@@ -1,0 +1,61 @@
+{
+  "competitionId": 14,
+  "routineRowCount": 1039,
+  "durationMinutes": {
+    "min": 1,
+    "p50": 3,
+    "p75": 3,
+    "p90": 3,
+    "max": 3,
+    "sum": 3075,
+    "under3Count": 28
+  },
+  "crossStageGaps": {
+    "count": 216,
+    "p50": 60,
+    "p75": 96.75,
+    "p90": 684,
+    "under15Count": 6,
+    "under30Count": 27,
+    "negativeCount": 0
+  },
+  "sameStudioCrossStageOverlapCount": 0,
+  "minutesByDayAndStage": {
+    "2026-04-09": {
+      "1": 441,
+      "2": 438
+    },
+    "2026-04-10": {
+      "1": 636,
+      "2": 528
+    },
+    "2026-04-11": {
+      "1": 357,
+      "2": 306
+    },
+    "2026-04-12": {
+      "1": 174,
+      "2": 195
+    }
+  },
+  "dayBounds": {
+    "2026-04-09": {
+      "firstStartMs": 1775746800000,
+      "lastEndMs": 1775779200000
+    },
+    "2026-04-10": {
+      "firstStartMs": 1775779200000,
+      "lastEndMs": 1775865600000
+    },
+    "2026-04-11": {
+      "firstStartMs": 1775865600000,
+      "lastEndMs": 1775952000000
+    },
+    "2026-04-12": {
+      "firstStartMs": 1775952000000,
+      "lastEndMs": 1775969640000
+    }
+  },
+  "crossStageGapsSoloBoth": 1,
+  "crossStageGapsSoloOneOrMixed": 5
+}

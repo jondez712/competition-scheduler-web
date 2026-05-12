@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "crossStageGapTryMinutes": [
+    30,
+    15,
+    0
+  ],
+  "uniformFallbackSlotMinutes": 3,
+  "slotDurationMode": "perRoutineFromPool"
+}
