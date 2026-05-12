@@ -51,7 +51,8 @@ npm run test    # Vitest (schedule parsing + analysis + draft export)
 This project is meant to live in **its own** Git remote (not inside a larger monorepo):
 
 1. Use this folder as the repo root (`git init` here if you are starting fresh).
-2. Create an empty repository on GitHub (or elsewhere) and `git remote add origin …`, then push.
+2. **GitHub CLI (fastest):** one-time `gh auth login`, then from this folder run `./scripts/create-github-repo.sh` (optional: `./scripts/create-github-repo.sh your-repo-name`). Or create an empty repo on GitHub and run `git remote add origin …` then `git push -u origin main`.
+
 3. Deploy with **Netlify** (or any Node host): connect the repo root; `netlify.toml` sets `npm run build` and Node 20. Copy env vars from `.env.example` into the host’s dashboard.
 
 ```bash
