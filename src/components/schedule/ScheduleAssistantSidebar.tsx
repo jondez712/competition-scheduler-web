@@ -2,6 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ScheduledRoutine } from "@/lib/schedule/types";
+import {
+  fitJsonToCharBudget,
+  pruneHitchkickPayloadForAssistant,
+} from "@/lib/schedule/assistantPayloadPrune";
 import { studioLockKeysFromList } from "@/lib/schedule/studioLock";
 import { applyScheduleAssistantOps, type ScheduleAssistantOp } from "@/lib/schedule/scheduleAssistantOps";
 
@@ -46,6 +50,24 @@ function ellipsize(s: string, max: number): string {
   return `${s.slice(0, max - 1)}…`;
 }
 
+/**
+ * Raw Hitchkick page cache can be 20MB+; Netlify and similar hosts reject huge POST bodies.
+ * Prune + cap JSON length before send. Server still re-merges for the model context budget.
+ */
+const WIRE_HITCHKICK_JSON_MAX_CHARS = 900_000;
+
+function hitchkickPayloadForAssistantWire(raw: unknown): unknown | undefined {
+  if (raw == null || typeof raw !== "object") return undefined;
+  if (Object.keys(raw as object).length === 0) return undefined;
+  try {
+    const pruned = pruneHitchkickPayloadForAssistant(raw);
+    const { json } = fitJsonToCharBudget(pruned, WIRE_HITCHKICK_JSON_MAX_CHARS);
+    return JSON.parse(json) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
 function describeAppliedAssistantOps(
   applied: ScheduleAssistantOp[],
   rowsBefore: ScheduledRoutine[],
@@ -81,6 +103,9 @@ function assistantFailureBubble(status: number, err?: string): string {
   }
   if (status === 401 || /invalid.*api key|incorrect api key/.test(e)) {
     return "OpenAI rejected the API key. Check OPENAI_API_KEY.";
+  }
+  if (status === 500 && (e.length === 0 || e.includes("internal server error"))) {
+    return "The assistant request failed on the server (500). If the schedule is very large, try again after a refresh; on Netlify, huge request bodies are rejected — this app now sends a pruned Hitchkick export. Redeploy if you are on an older build.";
   }
   return "I could not reach the assistant. See the red message below for details.";
 }
@@ -159,12 +184,9 @@ export function ScheduleAssistantSidebar({
         competitionName,
         competitionId,
       };
-      if (
-        hitchkickPayload != null &&
-        typeof hitchkickPayload === "object" &&
-        Object.keys(hitchkickPayload as object).length > 0
-      ) {
-        payload.hitchkickPayload = hitchkickPayload;
+      const hkWire = hitchkickPayloadForAssistantWire(hitchkickPayload);
+      if (hkWire != null) {
+        payload.hitchkickPayload = hkWire;
       }
       if (lockedStudios.length > 0) {
         payload.lockedStudios = lockedStudios;
@@ -174,11 +196,17 @@ export function ScheduleAssistantSidebar({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = (await res.json()) as {
-        error?: string;
-        reply?: string;
-        operations?: ScheduleAssistantOp[];
-      };
+      const rawRes = await res.text();
+      let data: { error?: string; reply?: string; operations?: ScheduleAssistantOp[] } = {};
+      if (rawRes.trim()) {
+        try {
+          data = JSON.parse(rawRes) as typeof data;
+        } catch {
+          setLastError(`HTTP ${res.status}: ${rawRes.replace(/\s+/g, " ").slice(0, 280)}`);
+          setMessages((m) => [...m, { role: "assistant", content: assistantFailureBubble(res.status, rawRes) }]);
+          return;
+        }
+      }
       if (!res.ok) {
         setLastError(data.error || `Request failed (${res.status})`);
         setMessages((m) => [...m, { role: "assistant", content: assistantFailureBubble(res.status, data.error) }]);
@@ -277,8 +305,9 @@ export function ScheduleAssistantSidebar({
           <div className="shrink-0 space-y-2 pb-3">
             <p className="text-xs text-zinc-600 dark:text-zinc-400">
               Ask about spacing, dancers by name, choreographers, same-studio overlaps, or say things like
-              “swap routines 12 and 15 on Saturday.” Each request sends the schedule already loaded in your browser
-              to the assistant (no extra Hitchkick round-trip). Refresh the page to pull the latest event export. Use{" "}
+              “swap routines 12 and 15 on Saturday.” Each request sends the schedule in your browser plus a{" "}
+              <strong>compact pruned</strong> Hitchkick export so hosts (e.g. Netlify) are not asked to accept a
+              multi‑megabyte JSON body. Refresh the page to pull the latest event export. Use{" "}
               <strong>Publish schedule</strong> above the timeline to write changes to Hitchkick when configured.
             </p>
             {schedule.length === 0 ? (
