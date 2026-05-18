@@ -5,6 +5,11 @@
 #   or CLI: `npx netlify login` then `npm run deploy:netlify` (production).
 # Set server-only env in Netlify: Site settings → Environment variables (see .env.example).
 #   HITCHKICK_PROXY_BASE (+ optional HITCHKICK_DIRECT_BASE / HITCHKICK_API_KEY, OPENAI_*, HITCHKICK_PUBLISH_PROXY_BASE).
+#
+# Schedule load calls the Hitchkick proxy from a Netlify function. On Starter, synchronous functions
+# can time out around ~10s; a slow cold start + proxy may yield a generic 502/HTML. Mitigations:
+#   set HITCHKICK_DIRECT_BASE + HITCHKICK_API_KEY so the app can fall back when the proxy fails, or
+#   use a plan / settings with a longer function duration.
 
 [build]
   command = "npm run build"

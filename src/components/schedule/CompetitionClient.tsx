@@ -37,6 +37,34 @@ function serializeScheduleForApi(rows: ScheduledRoutine[]) {
   return rows.map((r) => ({ ...r, start: r.start.toISOString(), end: r.end.toISOString() }));
 }
 
+function parseScheduleFetchPayload(text: string): {
+  ok: false; message: string;
+} | {
+  ok: true;
+  data: HitchkickScheduleResponse & { error?: string; hint?: string };
+} {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return {
+      ok: false,
+      message:
+        "Empty response from /api/schedule — often a Netlify or gateway timeout before the route could return JSON. Confirm HITCHKICK_* env vars on the site and redeploy; try HITCHKICK_DIRECT_BASE + HITCHKICK_API_KEY if the proxy is slow.",
+    };
+  }
+  try {
+    return {
+      ok: true,
+      data: JSON.parse(text) as HitchkickScheduleResponse & { error?: string; hint?: string },
+    };
+  } catch {
+    const snippet = trimmed.replace(/\s+/g, " ").slice(0, 280);
+    return {
+      ok: false,
+      message: `Server returned non-JSON (${trimmed.startsWith("<") ? "likely an HTML error page" : "unparseable body"}). This often means the host timed out the function (~10s on Netlify Starter) or returned a gateway error. Snippet: ${snippet}`,
+    };
+  }
+}
+
 export function CompetitionClient({ competitionId }: { competitionId: number }) {
   const competitionEntry = COMPETITIONS.find((c) => c.id === competitionId);
   const compName = competitionEntry?.name ?? `Competition ${competitionId}`;
@@ -117,10 +145,12 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
       setError(null);
       try {
         const res = await fetch(`/api/schedule/${competitionId}`);
-        const data = (await res.json()) as HitchkickScheduleResponse & {
-          error?: string;
-          hint?: string;
-        };
+        const raw = await res.text();
+        const parsed = parseScheduleFetchPayload(raw);
+        if (!parsed.ok) {
+          throw new Error(parsed.message);
+        }
+        const data = parsed.data;
         if (!res.ok) {
           const detail = [data.error, data.hint].filter(Boolean).join("\n\n");
           throw new Error(detail || `HTTP ${res.status}`);
@@ -428,7 +458,7 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
           <p className="text-zinc-600 dark:text-zinc-400">Loading event data…</p>
         )}
         {phase === "error" && error && (
-          <p className="rounded-lg border border-red-200 bg-red-50 p-4 text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
+          <p className="whitespace-pre-wrap break-words rounded-lg border border-red-200 bg-red-50 p-4 text-sm leading-relaxed text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
             {error}
           </p>
         )}
