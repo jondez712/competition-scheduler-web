@@ -33,6 +33,10 @@ import { ScheduleSessionToolbar } from "@/components/schedule/ScheduleSessionToo
 import { cloneScheduledRoutines } from "@/lib/schedule/scheduleSessionCore";
 import { useScheduleSession } from "@/lib/schedule/useScheduleSession";
 
+const publishPreviewUiEnabled =
+  process.env.NODE_ENV === "development" ||
+  process.env.NEXT_PUBLIC_PUBLISH_PREVIEW === "1";
+
 function serializeScheduleForApi(rows: ScheduledRoutine[]) {
   return rows.map((r) => ({ ...r, start: r.start.toISOString(), end: r.end.toISOString() }));
 }
@@ -304,6 +308,9 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
 
   const [isPublishing, setIsPublishing] = useState(false);
   const [dryRunNote, setDryRunNote] = useState<string | null>(null);
+  const [publishOutcomeNote, setPublishOutcomeNote] = useState<string | null>(null);
+  const [publishPreviewLog, setPublishPreviewLog] = useState<string | null>(null);
+  const [isPublishPreviewLoading, setIsPublishPreviewLoading] = useState(false);
   const [scheduleUiResetKey, setScheduleUiResetKey] = useState(0);
 
   const handleRevertToBaseline = useCallback(() => {
@@ -316,6 +323,8 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
     scheduleSession.clearPublishError();
     setIsPublishing(true);
     setDryRunNote(null);
+    setPublishOutcomeNote(null);
+    setPublishPreviewLog(null);
     try {
       const res = await fetch("/api/schedule/publish", {
         method: "POST",
@@ -334,6 +343,9 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
         dryRun?: boolean;
         message?: string;
         hint?: string;
+        directSaveSkipped?: boolean;
+        directSaveRoutineCount?: number;
+        directSaveDeltaCount?: number;
       };
 
       if (res.status === 409 && data.freshPayload) {
@@ -361,9 +373,13 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
       }
 
       if (data.dryRun === true) {
+        const deltaHint =
+          typeof data.directSaveDeltaCount === "number"
+            ? ` ${data.directSaveDeltaCount} routine(s) would be POSTed to Hitchkick (direct save).`
+            : "";
         setDryRunNote(
-          data.message ??
-            "Dry run: validated and merged locally — set HITCHKICK_PUBLISH_PROXY_BASE to write to Hitchkick."
+          (data.message ??
+            "Dry run: validated and merged locally — set HITCHKICK_PUBLISH_PROXY_BASE to write to Hitchkick.") + deltaHint
         );
         return;
       }
@@ -378,10 +394,95 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
       setHitchkickPayload(data.payload !== undefined ? data.payload : data);
       scheduleSession.applyPublishSuccess(scheduledOnly, data.payload ?? data);
       setDryRunNote(null);
+      if (data.directSaveSkipped === true) {
+        setPublishOutcomeNote(
+          "Hitchkick already matched your draft — no routine updates were sent."
+        );
+      } else if (
+        typeof data.directSaveRoutineCount === "number" &&
+        data.directSaveRoutineCount > 0
+      ) {
+        setPublishOutcomeNote(
+          `Sent ${data.directSaveRoutineCount} updated routine(s) to Hitchkick.`
+        );
+      } else {
+        setPublishOutcomeNote(null);
+      }
     } catch (e) {
       scheduleSession.reportPublishError(e instanceof Error ? e.message : "Publish failed");
     } finally {
       setIsPublishing(false);
+    }
+  }, [
+    sessionReady,
+    scheduleSession,
+    competitionId,
+    displayTimeZone,
+    competitionEntry?.timeZone,
+  ]);
+
+  const handlePublishPreview = useCallback(async () => {
+    if (!sessionReady || !scheduleSession.baselineRevision) return;
+    setIsPublishPreviewLoading(true);
+    setPublishPreviewLog(null);
+    scheduleSession.clearPublishError();
+    try {
+      const res = await fetch("/api/schedule/publish-preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          competitionId,
+          schedule: serializeScheduleForApi(scheduleSession.draft),
+          timeZone: displayTimeZone,
+          baselineRevision: scheduleSession.baselineRevision,
+          previewLimit: 500,
+        }),
+      });
+      const data = (await res.json()) as Record<string, unknown> & {
+        error?: string;
+        conflict?: boolean;
+        freshPayload?: HitchkickScheduleResponse;
+      };
+
+      if (res.status === 409 && data.freshPayload) {
+        const fresh = data.freshPayload;
+        const schedEntries = extractScheduleEntries(fresh);
+        const routines = parseRoutinesFromEntries(schedEntries);
+        const tz =
+          competitionEntry?.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const scheduledOnly = buildScheduledRoutines(routines, schedEntries, tz);
+        setEntries(schedEntries);
+        setScheduled(scheduledOnly);
+        setHitchkickPayload(fresh.payload !== undefined ? fresh.payload : fresh);
+        scheduleSession.rebaseline(scheduledOnly, fresh.payload ?? fresh);
+        scheduleSession.reportPublishError(
+          String(data.error ?? "Server schedule changed — state refreshed. Try preview again.")
+        );
+        return;
+      }
+
+      if (!res.ok) {
+        setPublishPreviewLog(
+          JSON.stringify(
+            { httpStatus: res.status, error: data.error ?? `HTTP ${res.status}`, body: data },
+            null,
+            2
+          )
+        );
+        return;
+      }
+
+      setPublishPreviewLog(JSON.stringify(data, null, 2));
+    } catch (e) {
+      setPublishPreviewLog(
+        JSON.stringify(
+          { error: e instanceof Error ? e.message : "Preview request failed" },
+          null,
+          2
+        )
+      );
+    } finally {
+      setIsPublishPreviewLoading(false);
     }
   }, [
     sessionReady,
@@ -501,6 +602,12 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
                   onDismissPublishError={scheduleSession.clearPublishError}
                   lastPublishedAt={scheduleSession.lastPublishedAt}
                   dryRunNote={dryRunNote}
+                  publishOutcomeNote={publishOutcomeNote}
+                  showPublishPreview={publishPreviewUiEnabled}
+                  onPublishPreview={handlePublishPreview}
+                  isPublishPreviewLoading={isPublishPreviewLoading}
+                  publishPreviewLog={publishPreviewLog}
+                  onDismissPublishPreview={() => setPublishPreviewLog(null)}
                 />
               }
             />

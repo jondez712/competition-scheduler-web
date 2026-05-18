@@ -19,6 +19,12 @@ export function ScheduleSessionToolbar({
   onDismissPublishError,
   lastPublishedAt,
   dryRunNote,
+  publishOutcomeNote,
+  showPublishPreview,
+  onPublishPreview,
+  isPublishPreviewLoading,
+  publishPreviewLog,
+  onDismissPublishPreview,
 }: {
   canUndo: boolean;
   canRedo: boolean;
@@ -36,6 +42,12 @@ export function ScheduleSessionToolbar({
   onDismissPublishError: () => void;
   lastPublishedAt: number | null;
   dryRunNote?: string | null;
+  publishOutcomeNote?: string | null;
+  showPublishPreview?: boolean;
+  onPublishPreview?: () => void;
+  isPublishPreviewLoading?: boolean;
+  publishPreviewLog?: string | null;
+  onDismissPublishPreview?: () => void;
 }) {
   return (
     <div className="space-y-3">
@@ -108,6 +120,16 @@ export function ScheduleSessionToolbar({
           >
             Save draft locally
           </button>
+          {showPublishPreview ? (
+            <button
+              type="button"
+              onClick={onPublishPreview}
+              disabled={isPublishing || !!restoreOffer || isPublishPreviewLoading}
+              className="rounded-md border border-violet-400/60 bg-violet-50 px-2.5 py-1.5 text-xs font-medium text-violet-900 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-violet-500/40 dark:bg-violet-950/50 dark:text-violet-100 dark:hover:bg-violet-950"
+            >
+              {isPublishPreviewLoading ? "Preview…" : "Preview HK POST"}
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={onPublish}
@@ -118,6 +140,32 @@ export function ScheduleSessionToolbar({
           </button>
         </div>
       </div>
+
+      {publishPreviewLog ? (
+        <div className="rounded-lg border border-violet-200 bg-violet-50/80 dark:border-violet-800 dark:bg-violet-950/40">
+          <div className="flex items-center justify-between gap-2 border-b border-violet-200 px-3 py-2 dark:border-violet-800">
+            <span className="text-xs font-medium text-violet-900 dark:text-violet-100">
+              Publish preview (no writes)
+            </span>
+            {onDismissPublishPreview ? (
+              <button
+                type="button"
+                onClick={onDismissPublishPreview}
+                className="text-xs text-violet-700 underline hover:text-violet-900 dark:text-violet-300"
+              >
+                Dismiss
+              </button>
+            ) : null}
+          </div>
+          <pre className="max-h-64 overflow-auto p-3 text-[11px] leading-snug text-zinc-800 dark:text-zinc-200">
+            {publishPreviewLog}
+          </pre>
+        </div>
+      ) : null}
+
+      {publishOutcomeNote ? (
+        <p className="text-xs text-emerald-700 dark:text-emerald-400">{publishOutcomeNote}</p>
+      ) : null}
 
       {dryRunNote ? (
         <p className="text-xs text-zinc-600 dark:text-zinc-400">{dryRunNote}</p>

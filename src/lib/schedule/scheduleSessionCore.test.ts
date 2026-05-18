@@ -93,28 +93,47 @@ describe("scheduleSessionCore", () => {
 });
 
 describe("mergeDraftRoutinesIntoHitchkickPayload", () => {
-  it("writes ISO times and stage onto routine entries", () => {
+  it("overwrites only number, startTime, and endTime on routine entries; preserves stage and routineIndex", () => {
     const draft = [
       routine({
         scheduleEntryId: "en1",
         start: new Date("2025-06-01T14:00:00.000Z"),
         end: new Date("2025-06-01T14:05:00.000Z"),
         stageNum: 3,
+        routineNumber: "150",
       }),
     ];
     const root = {
       scheduleEntries: [
-        { id: "en1", type: "routine", startTime: "old", endTime: "old", stage: { stageNum: 1 } },
+        {
+          id: "en1",
+          type: "routine",
+          number: "5",
+          routineIndex: 149,
+          startTime: "2025-01-01T00:00:00.000Z",
+          endTime: "2025-01-01T00:03:00.000Z",
+          stage: { stageNum: 1 },
+        },
         { id: "break1", type: "break" },
       ],
     };
     const out = mergeDraftRoutinesIntoHitchkickPayload(root, draft) as {
-      scheduleEntries: { id: string; startTime: string; endTime: string; stage: { stageNum: number } }[];
+      scheduleEntries: {
+        id: string;
+        type: string;
+        number?: string;
+        routineIndex?: number;
+        startTime: string;
+        endTime: string;
+        stage?: { stageNum: number };
+      }[];
     };
     const row = out.scheduleEntries.find((e) => e.id === "en1")!;
     expect(row.startTime).toBe(draft[0]!.start.toISOString());
     expect(row.endTime).toBe(draft[0]!.end.toISOString());
-    expect(row.stage.stageNum).toBe(3);
+    expect(row.number).toBe("150");
+    expect(row.routineIndex).toBe(149);
+    expect(row.stage?.stageNum).toBe(1);
     const br = out.scheduleEntries.find((e) => e.id === "break1")!;
     expect(br.type).toBe("break");
   });
