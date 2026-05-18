@@ -305,9 +305,10 @@ export function ScheduleAssistantSidebar({
           <div className="shrink-0 space-y-2 pb-3">
             <p className="text-xs text-zinc-600 dark:text-zinc-400">
               Ask about spacing, dancers by name, choreographers, same-studio overlaps, or say things like
-              “swap routines 12 and 15 on Saturday.” Each request sends the schedule in your browser plus a{" "}
-              <strong>compact pruned</strong> Hitchkick export so hosts (e.g. Netlify) are not asked to accept a
-              multi‑megabyte JSON body. Refresh the page to pull the latest event export. Use{" "}
+              “swap routines 12 and 15 on Saturday.” The <strong>timeline</strong> uses the schedule from the API
+              (studios, rosters, levels, and categories are preserved in a slim payload). Each assistant request
+              also includes a <strong>smaller pruned</strong> Hitchkick snippet for the model so hosts are not
+              asked to accept a multi‑megabyte JSON body. Refresh the page to pull the latest event export. Use{" "}
               <strong>Publish schedule</strong> above the timeline to write changes to Hitchkick when configured.
             </p>
             {schedule.length === 0 ? (

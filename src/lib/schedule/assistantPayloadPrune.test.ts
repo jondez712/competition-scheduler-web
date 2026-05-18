@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { fitJsonToCharBudget, pruneHitchkickPayloadForAssistant } from "./assistantPayloadPrune";
+import {
+  fitJsonToCharBudget,
+  lightenHitchkickScheduleResponseForClient,
+  pruneHitchkickPayloadForAssistant,
+} from "./assistantPayloadPrune";
 
 describe("assistantPayloadPrune", () => {
   it("shrinks payload and preserves scheduleEntries shape", () => {
@@ -64,6 +68,42 @@ describe("assistantPayloadPrune", () => {
       scheduleEntries: Array<{ parentRoutine?: { aotySegment?: string } }>;
     };
     expect(pruned.scheduleEntries[0]?.parentRoutine?.aotySegment).toBe("aoty_female");
+  });
+
+  it("resolves studio and classification from submission when parent omits registrations", () => {
+    const payload = {
+      scheduleEntries: [
+        {
+          id: "e1",
+          type: "routine",
+          parentRoutine: {
+            id: "p1",
+            title: "Dance",
+            submissionRoutines: [
+              {
+                registrations: { studios: { businessName: "Sub Studio LLC" } },
+                level: { name: "Mini" },
+                category: { name: "Tap" },
+                division: { name: "Line" },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const before = process.env.HITCHKICK_RETURN_FULL_SCHEDULE;
+    delete process.env.HITCHKICK_RETURN_FULL_SCHEDULE;
+    const out = lightenHitchkickScheduleResponseForClient({
+      success: true,
+      payload,
+    }) as { payload: { scheduleEntries: Array<{ parentRoutine?: Record<string, unknown> }> } };
+    if (before !== undefined) process.env.HITCHKICK_RETURN_FULL_SCHEDULE = before;
+    const pr = out.payload.scheduleEntries[0]?.parentRoutine;
+    expect(pr?.studioName).toBe("Sub Studio LLC");
+    expect((pr?.level as { name?: string })?.name).toBe("Mini");
+    expect((pr?.category as { name?: string })?.name).toBe("Tap");
+    expect((pr?.division as { name?: string })?.name).toBe("Line");
+    expect(pr?.registrations).toEqual({ studios: { businessName: "Sub Studio LLC" } });
   });
 
   it("caps roster arrays in parentRoutine", () => {
