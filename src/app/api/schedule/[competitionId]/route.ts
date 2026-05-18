@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { fetchScheduleForCompetition } from "@/lib/hitchkick/serverFetch";
+import { fetchScheduleForCompetition, hitchkickEnvSetupHint } from "@/lib/hitchkick/serverFetch";
+
+export const maxDuration = 60;
 
 type RouteParams = { params: Promise<{ competitionId: string }> };
 
@@ -22,7 +24,9 @@ export async function GET(_request: Request, { params }: RouteParams) {
     return NextResponse.json(
       {
         error: msg,
-        hint: "502 from localhost means the API route threw: Hitchkick/proxy unreachable, HTTP error, missing .env (HITCHKICK_PROXY_BASE or DIRECT+KEY), or dev server needs restart after editing .env.local. Open this URL in the browser or check the Network tab Response for the `error` string.",
+        hint:
+          "502 means this API route could not return a Hitchkick schedule. Typical causes: proxy/upstream error, wrong competition id, or missing server env vars. " +
+          hitchkickEnvSetupHint(),
       },
       { status: 502 }
     );

@@ -74,15 +74,33 @@ function describeAppliedAssistantOps(
 function assistantFailureBubble(status: number, err?: string): string {
   const e = (err || "").toLowerCase();
   if (status === 503 && e.includes("openai_api_key")) {
-    return "The assistant is not configured on the server (missing OPENAI_API_KEY). Add it to .env.local and restart.";
+    return "The assistant is not configured on the server (missing OPENAI_API_KEY). Add it in .env.local (local) or your host’s env (e.g. Netlify), then restart or redeploy.";
   }
   if (/context_length|maximum context|context_length_exceeded/.test(e)) {
-    return "This event is too large for one assistant request right now. Clear the chat above, or lower OPENAI_SCHEDULE_ASSISTANT_MAX_JSON_CHARS in .env.local (for example 35000) and restart the dev server.";
+    return "This event is too large for one assistant request right now. Clear the chat, or lower OPENAI_SCHEDULE_ASSISTANT_MAX_JSON_CHARS (e.g. 35000) in server env and restart/redeploy.";
   }
   if (status === 401 || /invalid.*api key|incorrect api key/.test(e)) {
     return "OpenAI rejected the API key. Check OPENAI_API_KEY.";
   }
   return "I could not reach the assistant. See the red message below for details.";
+}
+
+/** Netlify/platform errors are often HTML or plain text — `res.json()` would throw. */
+function assistantNonJsonBubble(status: number, rawSnippet: string): string {
+  const s = rawSnippet.toLowerCase();
+  if (
+    s.includes("internal server error") ||
+    s.includes("an unhandled error") ||
+    s.includes("function timeout") ||
+    s.includes("timed out")
+  ) {
+    return (
+      "The assistant endpoint failed on the server (response was not JSON—often a Netlify function timeout or crash). " +
+      "Try a shorter message, confirm OPENAI_API_KEY is set for production and redeployed, and check Netlify → Functions → logs. " +
+      "Free-tier function limits are short; long OpenAI calls may need a higher timeout plan or a smaller schedule payload."
+    );
+  }
+  return `The server returned non-JSON (${status}). ${rawSnippet ? `Preview: ${rawSnippet}` : "Empty body."}`;
 }
 
 export function ScheduleAssistantSidebar({
@@ -174,13 +192,19 @@ export function ScheduleAssistantSidebar({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = (await res.json()) as {
-        error?: string;
-        reply?: string;
-        operations?: ScheduleAssistantOp[];
-      };
+      const rawText = await res.text();
+      let data: { error?: string; hint?: string; reply?: string; operations?: ScheduleAssistantOp[] } = {};
+      try {
+        data = rawText ? (JSON.parse(rawText) as typeof data) : {};
+      } catch {
+        const snippet = rawText.replace(/\s+/g, " ").trim().slice(0, 240);
+        setLastError(`Not JSON (${res.status}): ${snippet || "(empty)"}`);
+        setMessages((m) => [...m, { role: "assistant", content: assistantNonJsonBubble(res.status, snippet) }]);
+        return;
+      }
       if (!res.ok) {
-        setLastError(data.error || `Request failed (${res.status})`);
+        const detail = [data.error, data.hint].filter(Boolean).join("\n\n");
+        setLastError(detail || `Request failed (${res.status})`);
         setMessages((m) => [...m, { role: "assistant", content: assistantFailureBubble(res.status, data.error) }]);
         return;
       }

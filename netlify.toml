@@ -4,7 +4,10 @@
 # Deploy: push to Git → Netlify “Add new site” → import repo (build cmd & Node are picked up from here),
 #   or CLI: `npx netlify login` then `npm run deploy:netlify` (production).
 # Set server-only env in Netlify: Site settings → Environment variables (see .env.example).
-#   HITCHKICK_PROXY_BASE (+ optional HITCHKICK_DIRECT_BASE / HITCHKICK_API_KEY, OPENAI_*, HITCHKICK_PUBLISH_PROXY_BASE).
+#   HITCHKICK_PROXY_BASE (+ optional HITCHKICK_DIRECT_BASE / HITCHKICK_API_KEY, OPENAI_API_KEY + optional OPENAI_*,
+#   HITCHKICK_PUBLISH_PROXY_BASE). Schedule assistant needs OPENAI_API_KEY or the route returns 503 JSON.
+#   If chat returns "Internal Server Error" in logs, check Netlify function timeout vs OpenAI latency (upgrade plan or shorten context).
+#   If chat times out: set OPENAI_SCHEDULE_ASSISTANT_SKIP_HITCHKICK_JSON=1 on Netlify (smaller prompt) and/or upgrade function duration.
 
 [build]
   command = "npm run build"

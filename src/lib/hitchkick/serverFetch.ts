@@ -5,6 +5,15 @@ function env(name: string): string | undefined {
   return v && v.trim() !== "" ? v.trim() : undefined;
 }
 
+/** Appended to configuration errors so local vs hosted deploys are both covered. */
+export function hitchkickEnvSetupHint(): string {
+  return (
+    "Set HITCHKICK_PROXY_BASE, or HITCHKICK_DIRECT_BASE with HITCHKICK_API_KEY (see .env.example). " +
+    "Local dev: put them in .env.local and restart the dev server. " +
+    "Netlify (or other hosts): add the same keys in the dashboard (e.g. Netlify Site configuration → Environment variables), then trigger a new deploy."
+  );
+}
+
 const fetchOpts: RequestInit = {
   cache: "no-store",
   next: { revalidate: 0 },
@@ -83,26 +92,22 @@ export async function fetchScheduleForCompetition(
   if (fromDirect) return fromDirect;
 
   if (!proxyBase && !directBase) {
-    throw new Error(
-      "No Hitchkick URL configured. Copy .env.example to .env.local and set HITCHKICK_PROXY_BASE (or HITCHKICK_DIRECT_BASE + HITCHKICK_API_KEY), then restart `npm run dev`."
-    );
+    throw new Error(`No Hitchkick URL configured. ${hitchkickEnvSetupHint()}`);
   }
   if (!proxyBase && directBase && !apiKey) {
     throw new Error(
-      "HITCHKICK_DIRECT_BASE is set but HITCHKICK_API_KEY is missing. Add the key to .env.local or set HITCHKICK_PROXY_BASE instead."
+      "HITCHKICK_DIRECT_BASE is set but HITCHKICK_API_KEY is missing. Add the API key in .env.local (local) or your host’s environment variables, or use HITCHKICK_PROXY_BASE instead."
     );
   }
   if (errors.length === 0) {
-    throw new Error(
-      "Could not load schedule: configure HITCHKICK_PROXY_BASE and/or direct base + API key in .env.local."
-    );
+    throw new Error(`Could not load schedule. ${hitchkickEnvSetupHint()}`);
   }
 
   let msg = errors.join(" • ");
   const proxyFailed = errors.some((e) => e.startsWith("proxy ("));
   if (proxyFailed && directBase && !apiKey) {
     msg +=
-      " — Proxy failed and direct Hitchkick was not used: add HITCHKICK_API_KEY to .env.local (same key the macOS app uses for direct schedule fetch), then restart the dev server.";
+      " — Proxy failed and direct Hitchkick was not used: add HITCHKICK_API_KEY in .env.local or your host env (same key the macOS app uses), then restart or redeploy.";
   } else if (proxyFailed && !directBase) {
     msg +=
       " — Tip: set HITCHKICK_DIRECT_BASE (see .env.example) and HITCHKICK_API_KEY so the app can fall back when the proxy returns 5xx.";

@@ -32,6 +32,7 @@ import { ScheduleAssistantSidebar } from "@/components/schedule/ScheduleAssistan
 import { ScheduleSessionToolbar } from "@/components/schedule/ScheduleSessionToolbar";
 import { cloneScheduledRoutines } from "@/lib/schedule/scheduleSessionCore";
 import { useScheduleSession } from "@/lib/schedule/useScheduleSession";
+import { responseJson } from "@/lib/httpJson";
 
 function serializeScheduleForApi(rows: ScheduledRoutine[]) {
   return rows.map((r) => ({ ...r, start: r.start.toISOString(), end: r.end.toISOString() }));
@@ -117,7 +118,7 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
       setError(null);
       try {
         const res = await fetch(`/api/schedule/${competitionId}`);
-        const data = (await res.json()) as HitchkickScheduleResponse & {
+        const data = (await responseJson(res, `GET /api/schedule/${competitionId}`)) as HitchkickScheduleResponse & {
           error?: string;
           hint?: string;
         };
@@ -298,7 +299,7 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
           hitchkickPayload,
         }),
       });
-      const data = (await res.json()) as HitchkickScheduleResponse & {
+      const data = (await responseJson(res, "POST /api/schedule/publish")) as HitchkickScheduleResponse & {
         error?: string;
         conflict?: boolean;
         freshPayload?: HitchkickScheduleResponse;
