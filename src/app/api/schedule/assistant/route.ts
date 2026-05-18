@@ -329,78 +329,70 @@ export async function POST(request: Request) {
   if (!lastUser?.content?.trim()) {
     return NextResponse.json({ error: "Include at least one user message" }, { status: 400 });
   }
-  try {
-    const schedule = deserializeSchedule(body.schedule);
-    const timeZone =
-      body.timeZone?.trim() ||
-      (typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC");
-    const competitionName = body.competitionName?.trim() || "Event";
 
-    const lockedStudiosList = Array.isArray(body.lockedStudios)
-      ? [...new Set(body.lockedStudios.map((s) => String(s).trim()).filter(Boolean))]
-      : [];
-    const lockedStudiosInstruction =
-      lockedStudiosList.length > 0
-        ? `
+  const schedule = deserializeSchedule(body.schedule);
+  const timeZone =
+    body.timeZone?.trim() ||
+    (typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC");
+  const competitionName = body.competitionName?.trim() || "Event";
+
+  const lockedStudiosList = Array.isArray(body.lockedStudios)
+    ? [...new Set(body.lockedStudios.map((s) => String(s).trim()).filter(Boolean))]
+    : [];
+  const lockedStudiosInstruction =
+    lockedStudiosList.length > 0
+      ? `
 
 Locked studios (automated edits): Staff locked these competing studios — do **not** put any routine from these studios in "operations". The UI rejects swaps that move them: ${lockedStudiosList.join("; ")}.`
-        : "";
-
-    const model = env("OPENAI_SCHEDULE_ASSISTANT_MODEL") ?? "gpt-4o-mini";
-    const tempRaw = env("OPENAI_SCHEDULE_ASSISTANT_TEMPERATURE");
-    let temperature: number | undefined;
-    if (modelAllowsCustomTemperature(model)) {
-      if (
-        tempRaw != null &&
-        Number.isFinite(Number(tempRaw)) &&
-        Number(tempRaw) >= 0 &&
-        Number(tempRaw) <= 2
-      ) {
-        temperature = Number(tempRaw);
-      } else {
-        temperature = 0.3;
-      }
-    }
-
-    const dayLegend = schedule.length ? scheduleDayLegend(schedule, timeZone) : "";
-    const overlapVerified = schedule.length
-      ? verifiedSameStudioTimeOverlapsBlock(schedule, timeZone)
       : "";
-    const tsv = schedule.length ? scheduleTsvForAssistant(schedule, timeZone) : "(empty schedule)";
-    const findings = schedule.length ? findingsSummary(schedule, timeZone) : "";
 
-    let hitchBlock = "";
-    const rawCid = body.competitionId;
-    const cid =
-      typeof rawCid === "number"
-        ? rawCid
-        : typeof rawCid === "string"
-          ? Number(rawCid)
-          : NaN;
-    const cidInt = Number.isFinite(cid) && cid > 0 ? Math.floor(cid) : 0;
-    const clientPayload = body.hitchkickPayload;
-    const useClientPayload =
-      cidInt > 0 &&
-      clientPayload != null &&
-      typeof clientPayload === "object" &&
-      clientPayload !== null &&
-      Object.keys(clientPayload as object).length > 0;
-
-    if (useClientPayload) {
-      hitchBlock = formatHitchkickJsonBlock(clientPayload, cidInt, "client-cache");
-    } else if (cidInt > 0) {
-      hitchBlock = await hitchkickPayloadBlock(cidInt);
+  const model = env("OPENAI_SCHEDULE_ASSISTANT_MODEL") ?? "gpt-4o-mini";
+  const tempRaw = env("OPENAI_SCHEDULE_ASSISTANT_TEMPERATURE");
+  let temperature: number | undefined;
+  if (modelAllowsCustomTemperature(model)) {
+    if (
+      tempRaw != null &&
+      Number.isFinite(Number(tempRaw)) &&
+      Number(tempRaw) >= 0 &&
+      Number(tempRaw) <= 2
+    ) {
+      temperature = Number(tempRaw);
+    } else {
+      temperature = 0.3;
     }
+  }
 
-    const skipJson =
-      env("OPENAI_SCHEDULE_ASSISTANT_SKIP_HITCHKICK_JSON") === "1" ||
-      env("OPENAI_SCHEDULE_ASSISTANT_SKIP_HITCHKICK_JSON")?.toLowerCase() === "true";
-    if (skipJson) {
-      hitchBlock =
-        "\n\n(Hitchkick JSON block omitted — OPENAI_SCHEDULE_ASSISTANT_SKIP_HITCHKICK_JSON is set. Use the TSV above: row count = number of timed routines; TSV has roster/choreographer columns where present.)\n";
-    }
+  const dayLegend = schedule.length ? scheduleDayLegend(schedule, timeZone) : "";
+  const overlapVerified = schedule.length
+    ? verifiedSameStudioTimeOverlapsBlock(schedule, timeZone)
+    : "";
+  const tsv = schedule.length ? scheduleTsvForAssistant(schedule, timeZone) : "(empty schedule)";
+  const findings = schedule.length ? findingsSummary(schedule, timeZone) : "";
 
-    const system = `You are a dance competition schedule copilot for staff using an in-browser timeline editor.
+  let hitchBlock = "";
+  const rawCid = body.competitionId;
+  const cid =
+    typeof rawCid === "number"
+      ? rawCid
+      : typeof rawCid === "string"
+        ? Number(rawCid)
+        : NaN;
+  const cidInt = Number.isFinite(cid) && cid > 0 ? Math.floor(cid) : 0;
+  const clientPayload = body.hitchkickPayload;
+  const useClientPayload =
+    cidInt > 0 &&
+    clientPayload != null &&
+    typeof clientPayload === "object" &&
+    clientPayload !== null &&
+    Object.keys(clientPayload as object).length > 0;
+
+  if (useClientPayload) {
+    hitchBlock = formatHitchkickJsonBlock(clientPayload, cidInt, "client-cache");
+  } else if (cidInt > 0) {
+    hitchBlock = await hitchkickPayloadBlock(cidInt);
+  }
+
+  const system = `You are a dance competition schedule copilot for staff using an in-browser timeline editor.
 
 Context: ${competitionName}. All local times use timezone: ${timeZone}.
 
@@ -431,8 +423,8 @@ Read vs write (critical):
 
 Rules:
 - Only propose changes the UI can apply. Valid JSON operations:
-    1) {"op":"swap_by_entry_id","entryIdA":"<scheduleEntryId>","entryIdB":"<scheduleEntryId>"} — swaps time+stage between two routines; they MUST share the same calendarDayKey.
-    2) {"op":"swap_by_routine_numbers","dayKey":"YYYY-MM-DD","routineNumberA":"#","routineNumberB":"#"} — when routine numbers uniquely identify one row each on that day.
+  1) {"op":"swap_by_entry_id","entryIdA":"<scheduleEntryId>","entryIdB":"<scheduleEntryId>"} — swaps time+stage between two routines; they MUST share the same calendarDayKey.
+  2) {"op":"swap_by_routine_numbers","dayKey":"YYYY-MM-DD","routineNumberA":"#","routineNumberB":"#"} — when routine numbers uniquely identify one row each on that day.
 
 - Reordering may require several chained swaps; return operations in the order they should be applied.
 - If the user only wants analysis or explanation, use an empty operations array (and a helpful "reply").
@@ -445,12 +437,13 @@ ${lockedStudiosInstruction}
 You MUST respond with ONLY valid JSON (no prose outside JSON) in this exact shape:
 {"reply":"<string>","operations":[ ... ]}`;
 
-    const userBlock = `Calendar days in this export (timezone ${timeZone}):\n${dayLegend || "—"}\n\n${overlapVerified}\n\nAutomated checks (may be partial):\n${findings || "—"}\n\nCurrent schedule TSV (${schedule.length} rows):\n${tsv}${hitchBlock}\n\nConversation (latest user request should be answered):\n${messages
+  const userBlock = `Calendar days in this export (timezone ${timeZone}):\n${dayLegend || "—"}\n\n${overlapVerified}\n\nAutomated checks (may be partial):\n${findings || "—"}\n\nCurrent schedule TSV (${schedule.length} rows):\n${tsv}${hitchBlock}\n\nConversation (latest user request should be answered):\n${messages
     .filter((m) => m.role === "user" || m.role === "assistant")
     .slice(-2)
     .map((m) => `${m.role}: ${m.content}`)
     .join("\n")}`;
 
+  try {
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -477,21 +470,9 @@ You MUST respond with ONLY valid JSON (no prose outside JSON) in this exact shap
       );
     }
 
-    const openaiRaw = await res.text();
-    let data: {
+    const data = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };
-    try {
-      data = JSON.parse(openaiRaw);
-    } catch {
-      return NextResponse.json(
-        {
-          error: "OpenAI returned non-JSON.",
-          raw: openaiRaw.slice(0, 400),
-        },
-        { status: 502 }
-      );
-    }
     const content = data.choices?.[0]?.message?.content;
     if (!content) {
       return NextResponse.json({ error: "Empty model response" }, { status: 502 });
@@ -514,13 +495,6 @@ You MUST respond with ONLY valid JSON (no prose outside JSON) in this exact shap
     return NextResponse.json({ reply, operations });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Assistant request failed";
-    return NextResponse.json(
-      {
-        error: msg,
-        hint:
-          "On Netlify: check Functions/logs for timeouts (Free tier is often ~10s). Shrink context with OPENAI_SCHEDULE_ASSISTANT_SKIP_HITCHKICK_JSON=1 and/or OPENAI_SCHEDULE_ASSISTANT_MAX_JSON_CHARS=35000, or upgrade for longer runs.",
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

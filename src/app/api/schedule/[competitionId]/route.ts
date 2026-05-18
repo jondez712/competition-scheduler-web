@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 import { fetchScheduleForCompetition, hitchkickEnvSetupHint } from "@/lib/hitchkick/serverFetch";
 
-export const maxDuration = 60;
-
 type RouteParams = { params: Promise<{ competitionId: string }> };
 
 export async function GET(_request: Request, { params }: RouteParams) {
