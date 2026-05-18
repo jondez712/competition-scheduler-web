@@ -14,6 +14,7 @@ import {
   persistPlannerDayKeys,
   pruneCategorySlotAssignmentsToPlannerDays,
   buildScheduledRoutines,
+  buildScheduledTimelineBlocks,
   type CategorySlotAssignment,
 } from "@/lib/schedule";
 import {
@@ -129,6 +130,11 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
       scheduleSession.rebaseline(scheduled, hitchkickPayload);
     }
   }, [phase, entryMode, scheduleServerSig, scheduled, hitchkickPayload, scheduleSession.rebaseline]);
+
+  const timelineBlocks = useMemo(
+    () => buildScheduledTimelineBlocks(entries, displayTimeZone),
+    [entries, displayTimeZone]
+  );
 
   const routineBreakdownRows = useMemo(() => buildRoutineBreakdownFromScheduled(scheduled), [scheduled]);
   const routineRowsInExport = useMemo(
@@ -311,6 +317,7 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
   const [publishOutcomeNote, setPublishOutcomeNote] = useState<string | null>(null);
   const [publishPreviewLog, setPublishPreviewLog] = useState<string | null>(null);
   const [isPublishPreviewLoading, setIsPublishPreviewLoading] = useState(false);
+  const [publishConfirmOpen, setPublishConfirmOpen] = useState(false);
   const [scheduleUiResetKey, setScheduleUiResetKey] = useState(0);
 
   const handleRevertToBaseline = useCallback(() => {
@@ -318,7 +325,7 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
     setScheduleUiResetKey((k) => k + 1);
   }, [scheduleSession.resetDraftToBaseline]);
 
-  const handlePublishSchedule = useCallback(async () => {
+  const executePublishSchedule = useCallback(async () => {
     if (!sessionReady || !scheduleSession.baselineRevision) return;
     scheduleSession.clearPublishError();
     setIsPublishing(true);
@@ -420,6 +427,32 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
     displayTimeZone,
     competitionEntry?.timeZone,
   ]);
+
+  const handlePublishSchedule = useCallback(() => {
+    if (!sessionReady || !scheduleSession.baselineRevision) return;
+    setPublishConfirmOpen(true);
+  }, [sessionReady, scheduleSession.baselineRevision]);
+
+  const handlePublishConfirmCancel = useCallback(() => {
+    setPublishConfirmOpen(false);
+  }, []);
+
+  const handlePublishConfirmProceed = useCallback(() => {
+    setPublishConfirmOpen(false);
+    void executePublishSchedule();
+  }, [executePublishSchedule]);
+
+  useEffect(() => {
+    if (!publishConfirmOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setPublishConfirmOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [publishConfirmOpen]);
 
   const handlePublishPreview = useCallback(async () => {
     if (!sessionReady || !scheduleSession.baselineRevision) return;
@@ -570,10 +603,15 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
 
         {showImportView &&
           (scheduled.length === 0 ? (
-            <ImportedScheduleView scheduled={scheduled} displayTimeZone={displayTimeZone} />
+            <ImportedScheduleView
+              scheduled={scheduled}
+              timelineBlocks={timelineBlocks}
+              displayTimeZone={displayTimeZone}
+            />
           ) : (
             <ImportedScheduleView
               scheduled={displayBaseline}
+              timelineBlocks={timelineBlocks}
               displayTimeZone={displayTimeZone}
               editedScheduled={displayDraft}
               onEditedScheduledChange={(action, opts) =>
@@ -652,6 +690,56 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
           pendingMessage={assistantPendingMessage}
           lockedStudios={entryMode === "import" ? scheduleSession.lockedStudios : []}
         />
+      ) : null}
+
+      {publishConfirmOpen ? (
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center bg-zinc-950/45 p-4 backdrop-blur-[2px] dark:bg-black/55"
+          role="presentation"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setPublishConfirmOpen(false);
+            }
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="publish-confirm-title"
+            className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl dark:border-zinc-600 dark:bg-zinc-900"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2
+              id="publish-confirm-title"
+              className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-50"
+            >
+              Publish to Hitchkick?
+            </h2>
+            <p className="mt-2 text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+              With Hitchkick direct save, only routines that differ from the server are updated
+              (numbers, times, and related fields). If your site uses a publish proxy instead, the
+              full merged schedule is sent.
+            </p>
+            <div className="mt-6 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={handlePublishConfirmCancel}
+                disabled={isPublishing}
+                className="rounded-lg border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-800 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handlePublishConfirmProceed}
+                disabled={isPublishing}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+              >
+                Publish schedule
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </div>
   );

@@ -144,4 +144,42 @@ describe("assistantPayloadPrune", () => {
     const parsed = JSON.parse(json) as { scheduleEntries: unknown[] };
     expect(parsed.scheduleEntries.length).toBeLessThan(500);
   });
+
+  it("preserves break displayName, totalTime, and lite group for timeline meta rows", () => {
+    const payload = {
+      scheduleEntries: [
+        {
+          id: "25837",
+          type: "break",
+          displayName: "Judge Break!",
+          startTime: "2026-07-05T23:18:00.000Z",
+          endTime: "2026-07-05T23:48:00.000Z",
+          totalTime: 1_800_000,
+          stage: { name: "Stage 4", stageNum: 4 },
+          cluster: { clusterIndex: 0 },
+          group: {
+            type: "break",
+            displayName: "Judge Break!",
+            totalTime: 1_800_000,
+            clusterId: "758",
+            startTime: null,
+            endTime: null,
+          },
+          parentRoutine: null,
+        },
+      ],
+    };
+    const pruned = pruneHitchkickPayloadForAssistant(payload) as {
+      scheduleEntries: Array<Record<string, unknown>>;
+    };
+    const row = pruned.scheduleEntries[0]!;
+    expect(row.displayName).toBe("Judge Break!");
+    expect(row.totalTime).toBe(1_800_000);
+    expect(row.group).toMatchObject({
+      type: "break",
+      displayName: "Judge Break!",
+      totalTime: 1_800_000,
+      clusterId: "758",
+    });
+  });
 });

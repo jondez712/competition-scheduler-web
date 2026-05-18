@@ -16,7 +16,7 @@ import {
   reorderTimelineInsertAtEdge,
 } from "@/lib/schedule";
 import type { OptimizerResult, SwapLogEntry } from "@/lib/schedule/importedScheduleOptimizer";
-import type { ScheduledRoutine } from "@/lib/schedule/types";
+import type { ScheduledRoutine, ScheduledTimelineBlock } from "@/lib/schedule/types";
 import { TimelineSection } from "@/components/schedule/TimelineSection";
 import { ScheduleFilterBar, type StudioFilterMode } from "@/components/schedule/ScheduleFilterBar";
 import { FindingsPanel } from "@/components/schedule/FindingsPanel";
@@ -206,6 +206,7 @@ function OptimizerBanner({
 
 export function ImportedScheduleView({
   scheduled,
+  timelineBlocks = [],
   displayTimeZone,
   editedScheduled: controlledEdited,
   onEditedScheduledChange,
@@ -217,6 +218,8 @@ export function ImportedScheduleView({
   sessionToolbar,
 }: {
   scheduled: ScheduledRoutine[];
+  /** Breaks / awards / other timed Hitchkick rows (built from raw `scheduleEntries`). */
+  timelineBlocks?: ScheduledTimelineBlock[];
   displayTimeZone: string;
   editedScheduled?: ScheduledRoutine[];
   onEditedScheduledChange?: (
@@ -306,17 +309,17 @@ export function ImportedScheduleView({
       ),
     [editedScheduled]
   );
-  const dayKeys = useMemo(
-    () =>
-      [...new Set(editedScheduled.map((r) => r.calendarDayKey))].sort((a, b) =>
-        a.localeCompare(b)
-      ),
-    [editedScheduled]
-  );
-  const stageNums = useMemo(
-    () => [...new Set(editedScheduled.map((r) => r.stageNum))].sort((a, b) => a - b),
-    [editedScheduled]
-  );
+  const dayKeys = useMemo(() => {
+    const fromR = editedScheduled.map((r) => r.calendarDayKey);
+    const fromB = timelineBlocks.map((b) => b.calendarDayKey);
+    return [...new Set([...fromR, ...fromB])].sort((a, b) => a.localeCompare(b));
+  }, [editedScheduled, timelineBlocks]);
+
+  const stageNums = useMemo(() => {
+    const fromR = editedScheduled.map((r) => r.stageNum);
+    const fromB = timelineBlocks.map((b) => b.stageNum);
+    return [...new Set([...fromR, ...fromB])].sort((a, b) => a - b);
+  }, [editedScheduled, timelineBlocks]);
 
   const fullFindings = useMemo(
     () =>
@@ -325,10 +328,18 @@ export function ImportedScheduleView({
     [scheduleForAnalysis, displayTimeZone]
   );
 
-  const { timelineRows, emphasizeStudio } = useMemo(() => {
+  const { timelineRows, filteredTimelineBlocks, emphasizeStudio } = useMemo(() => {
     let rows = editedScheduled;
-    if (filterDay !== "all") rows = rows.filter((r) => r.calendarDayKey === filterDay);
-    if (filterStage !== "all") rows = rows.filter((r) => r.stageNum === filterStage);
+    let blocks = timelineBlocks;
+
+    if (filterDay !== "all") {
+      rows = rows.filter((r) => r.calendarDayKey === filterDay);
+      blocks = blocks.filter((b) => b.calendarDayKey === filterDay);
+    }
+    if (filterStage !== "all") {
+      rows = rows.filter((r) => r.stageNum === filterStage);
+      blocks = blocks.filter((b) => b.stageNum === filterStage);
+    }
 
     let emphasize: string | undefined;
     if (studioMode === "only" && selectedStudio.trim()) {
@@ -345,11 +356,17 @@ export function ImportedScheduleView({
         const instructor = r.choreographer.trim().toLowerCase();
         return studio.includes(q) || title.includes(q) || instructor.includes(q);
       });
+      blocks = blocks.filter((b) => b.label.toLowerCase().includes(q));
     }
 
-    return { timelineRows: rows, emphasizeStudio: emphasize };
+    return {
+      timelineRows: rows,
+      filteredTimelineBlocks: blocks,
+      emphasizeStudio: emphasize,
+    };
   }, [
     editedScheduled,
+    timelineBlocks,
     filterDay,
     filterStage,
     studioMode,
@@ -362,7 +379,10 @@ export function ImportedScheduleView({
     return fullFindings.filter((f) => f.scheduleEntryIds.some((id) => id && ids.has(id)));
   }, [timelineRows, fullFindings]);
 
-  const groups = useMemo(() => buildTimelineGroups(timelineRows), [timelineRows]);
+  const groups = useMemo(
+    () => buildTimelineGroups(timelineRows, filteredTimelineBlocks),
+    [timelineRows, filteredTimelineBlocks]
+  );
 
   /** Same-stage drag reorder only when studio filter is default (not Only / Highlight). */
   const timelineReorderEnabled = studioMode === "all" && !interactionLocked;
@@ -681,9 +701,9 @@ export function ImportedScheduleView({
         )}
       </div>
 
-      {timelineRows.length === 0 ? (
+      {timelineRows.length === 0 && filteredTimelineBlocks.length === 0 ? (
         <p className="text-sm text-zinc-500 dark:text-zinc-400">
-          No routines match the current filters.
+          Nothing matches the current filters.
           {debouncedTimelineSearch
             ? " Try clearing search or widening day, stage, or studio filters."
             : " Widen day, stage, or studio filters."}

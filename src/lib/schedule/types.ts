@@ -106,6 +106,23 @@ export type ScheduledRoutine = {
   rosterDancerIds: string[];
 };
 
+/** Non-routine Hitchkick row: break, awards block, or other timed meta entry. */
+export type TimelineBlockKind = "break" | "award" | "other";
+
+export type ScheduledTimelineBlock = {
+  scheduleEntryId: string;
+  kind: TimelineBlockKind;
+  /** Display label (title + optional break duration suffix). */
+  label: string;
+  stageNum: number;
+  clusterIndex: string;
+  calendarDayKey: string;
+  start: Date;
+  end: Date;
+  /** Original Hitchkick `type` string. */
+  rawType: string;
+};
+
 export type ProposedOrderRow = {
   stageNum: number;
   calendarDayKey: string;

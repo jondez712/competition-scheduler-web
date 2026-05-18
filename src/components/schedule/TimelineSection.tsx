@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
 import {
   draggable,
@@ -14,13 +14,16 @@ import {
 import {
   buildRowStartsFromAll,
   routinesByStageAndStart,
+  timelineBlockLayout,
   type TimelineGroupModel,
 } from "@/lib/schedule";
 import type {
   ScheduledRoutine,
+  ScheduledTimelineBlock,
   ScheduleFinding,
   ScheduleFindingSeverity,
 } from "@/lib/schedule/types";
+import { formatTimeRangeInZone } from "@/lib/schedule/timeParsing";
 import { severityFriendlyLabel, shortTopicForCode } from "@/lib/schedule/types";
 import { divisionLabelWithAotySegment } from "@/lib/aotySegmentDisplay";
 import {
@@ -101,6 +104,34 @@ function severityAccent(sev: ReturnType<typeof maxSeverityForEntry>): string {
   if (sev === "warning") return "border-l-4 border-amber-500";
   if (sev === "info") return "border-l-4 border-sky-500";
   return "";
+}
+
+function TimelineBlockCard({ block, timeZone }: { block: ScheduledTimelineBlock; timeZone: string }) {
+  const range = formatTimeRangeInZone(block.start, block.end, timeZone);
+  const palette =
+    block.kind === "break"
+      ? {
+          box: "border-amber-300/90 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/35",
+          text: "text-amber-950 dark:text-amber-100",
+        }
+      : block.kind === "award"
+        ? {
+            box: "border-pink-400/80 bg-pink-50 dark:border-pink-800/70 dark:bg-pink-950/35",
+            text: "text-pink-950 dark:text-pink-100",
+          }
+        : {
+            box: "border-slate-300 bg-slate-100 dark:border-slate-600 dark:bg-slate-800/50",
+            text: "text-slate-900 dark:text-slate-100",
+          };
+
+  return (
+    <div
+      className={`flex min-h-[3.5rem] flex-col items-center justify-center rounded-md border px-2 py-3 text-center ${palette.box}`}
+    >
+      <div className={`text-sm font-semibold leading-snug tracking-tight ${palette.text}`}>{block.label}</div>
+      <div className={`mt-1.5 text-xs font-semibold tabular-nums ${palette.text}`}>{range}</div>
+    </div>
+  );
 }
 
 function maxSeverityInList(
@@ -550,10 +581,19 @@ export function TimelineSection({
   return (
     <div className="min-w-0 space-y-10">
       {groups.map((g) => {
-        const stages = [...new Set(g.routines.map((r) => r.stageNum))].sort((a, b) => a - b);
+        const stages = [
+          ...new Set([...g.routines.map((r) => r.stageNum), ...g.blocks.map((b) => b.stageNum)]),
+        ].sort((a, b) => a - b);
         const byStageStart = routinesByStageAndStart(g.routines);
-        const rowStarts = buildRowStartsFromAll(g.routines);
+        const rowStartsMs = buildRowStartsFromAll(g.routines, g.blocks);
+        const { covered, blockAt } = timelineBlockLayout(rowStartsMs, g.blocks);
         const classicTwo = stages.length === 2 && stages[0] === 1 && stages[1] === 2;
+        const metaBits = [
+          `${g.routines.length} routine${g.routines.length === 1 ? "" : "s"}`,
+          g.blocks.length ? `${g.blocks.length} block${g.blocks.length === 1 ? "" : "s"}` : "",
+        ]
+          .filter(Boolean)
+          .join(" · ");
 
         return (
           <section
@@ -562,7 +602,7 @@ export function TimelineSection({
           >
             <div className="bg-zinc-900 px-4 py-3 text-center">
               <div className="text-xs font-semibold tracking-[0.2em] text-violet-300/90">
-                ALL SESSIONS · {g.routines.length} ROUTINES
+                ALL SESSIONS · {metaBits}
               </div>
               <div className="mt-1 text-lg font-bold tracking-wide text-pink-400">
                 {formatDayBanner(g.dayKey, tz)}
@@ -621,53 +661,83 @@ export function TimelineSection({
                   </tr>
                 </thead>
                 <tbody>
-                  {rowStarts.length === 0 ? (
+                  {rowStartsMs.length === 0 ? (
                     <tr>
                       <td
                         colSpan={Math.max(3, stages.length + 1)}
                         className="px-4 py-6 text-center text-zinc-500"
                       >
-                        No routines with start times on this day.
+                        No schedule rows with start times on this day.
                       </td>
                     </tr>
                   ) : (
-                    rowStarts.map((t, idx) => {
+                    rowStartsMs.map((t, idx) => {
                       const zebra =
                         idx % 2 === 0 ? "bg-white dark:bg-zinc-950" : "bg-zinc-50/90 dark:bg-zinc-900/40";
                       const rowDate = new Date(t);
 
                       if (classicTwo) {
-                        const r1 = byStageStart.get(1)?.get(t) ?? [];
-                        const r2 = byStageStart.get(2)?.get(t) ?? [];
+                        const r1raw = byStageStart.get(1)?.get(t) ?? [];
+                        const r2raw = byStageStart.get(2)?.get(t) ?? [];
+                        const b1 = blockAt.get(`${idx}|1`);
+                        const b2 = blockAt.get(`${idx}|2`);
+                        const r1 = b1 ? [] : r1raw;
+                        const r2 = b2 ? [] : r2raw;
                         return (
                           <tr key={t} className={zebra}>
-                            <StageCell
-                              routines={r1}
-                              stageNum={1}
-                              align="left"
-                              findingsMap={findingsMap}
-                              highlight={highlight}
-                              selectedEntryId={selectedEntryId}
-                              onSelect={setSelectedEntryId}
-                              borderRight
-                              emphasizeStudioName={emphasizeStudioName}
-                              interactive={!!interactive}
-                            />
+                            {covered.has(`${idx}|1`) ? (
+                              <Fragment key="cov1" />
+                            ) : b1 ? (
+                              <td
+                                key="b1"
+                                rowSpan={b1.rowspan}
+                                className="min-w-0 align-top border-b border-r border-zinc-200/80 px-2 py-2 sm:px-3 dark:border-zinc-700/80"
+                              >
+                                <TimelineBlockCard block={b1.block} timeZone={tz} />
+                              </td>
+                            ) : (
+                              <StageCell
+                                key="s1"
+                                routines={r1}
+                                stageNum={1}
+                                align="left"
+                                findingsMap={findingsMap}
+                                highlight={highlight}
+                                selectedEntryId={selectedEntryId}
+                                onSelect={setSelectedEntryId}
+                                borderRight
+                                emphasizeStudioName={emphasizeStudioName}
+                                interactive={!!interactive}
+                              />
+                            )}
                             <td className="min-w-0 border-r border-zinc-200/80 px-1 py-2 text-center font-mono text-[10px] tabular-nums leading-tight text-zinc-600 dark:border-zinc-700/80 dark:text-zinc-400 sm:px-2 sm:text-xs">
                               {formatStartClock(rowDate, tz)}
                             </td>
-                            <StageCell
-                              routines={r2}
-                              stageNum={2}
-                              align="right"
-                              findingsMap={findingsMap}
-                              highlight={highlight}
-                              selectedEntryId={selectedEntryId}
-                              onSelect={setSelectedEntryId}
-                              borderRight={false}
-                              emphasizeStudioName={emphasizeStudioName}
-                              interactive={!!interactive}
-                            />
+                            {covered.has(`${idx}|2`) ? (
+                              <Fragment key="cov2" />
+                            ) : b2 ? (
+                              <td
+                                key="b2"
+                                rowSpan={b2.rowspan}
+                                className="min-w-0 align-top border-b border-zinc-200/80 px-2 py-2 sm:px-3 dark:border-zinc-700/80"
+                              >
+                                <TimelineBlockCard block={b2.block} timeZone={tz} />
+                              </td>
+                            ) : (
+                              <StageCell
+                                key="s2"
+                                routines={r2}
+                                stageNum={2}
+                                align="right"
+                                findingsMap={findingsMap}
+                                highlight={highlight}
+                                selectedEntryId={selectedEntryId}
+                                onSelect={setSelectedEntryId}
+                                borderRight={false}
+                                emphasizeStudioName={emphasizeStudioName}
+                                interactive={!!interactive}
+                              />
+                            )}
                           </tr>
                         );
                       }
@@ -678,6 +748,25 @@ export function TimelineSection({
                             {formatStartClock(rowDate, tz)}
                           </td>
                           {stages.map((sn, sidx) => {
+                            if (covered.has(`${idx}|${sn}`)) {
+                              return <Fragment key={sn} />;
+                            }
+                            const binfo = blockAt.get(`${idx}|${sn}`);
+                            if (binfo) {
+                              return (
+                                <td
+                                  key={sn}
+                                  rowSpan={binfo.rowspan}
+                                  className={`min-w-0 align-top border-b border-zinc-200/80 px-2 py-2 sm:px-3 dark:border-zinc-700/80 ${
+                                    sidx < stages.length - 1
+                                      ? "border-r border-zinc-200/80 dark:border-zinc-700/80"
+                                      : ""
+                                  }`}
+                                >
+                                  <TimelineBlockCard block={binfo.block} timeZone={tz} />
+                                </td>
+                              );
+                            }
                             const list = byStageStart.get(sn)?.get(t) ?? [];
                             return (
                               <StageCell

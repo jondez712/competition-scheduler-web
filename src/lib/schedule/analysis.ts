@@ -1,5 +1,5 @@
 import type { HitchkickScheduleEntry } from "@/lib/hitchkick/types";
-import { jsonString } from "./parse";
+import { jsonInt, jsonString } from "./parse";
 import {
   formatEventCalendarDayLabel,
   formatTimeRangeInZone,
@@ -16,8 +16,10 @@ import type {
   ProposedOrderRow,
   ScheduleAnalysisConfig,
   ScheduledRoutine,
+  ScheduledTimelineBlock,
   ScheduleFinding,
   ScheduleFindingSeverity,
+  TimelineBlockKind,
 } from "./types";
 import { defaultAnalysisConfig } from "./types";
 import { divisionLabelWithAotySegment } from "@/lib/aotySegmentDisplay";
@@ -177,6 +179,154 @@ export function buildScheduledRoutines(
       levelName: r.levelName,
       rosterDancerNames: dancerNames,
       rosterDancerIds: dancers,
+    });
+  }
+  return out;
+}
+
+function scheduleEntryGroup(entry: HitchkickScheduleEntry): Record<string, unknown> | null {
+  const g = (entry as Record<string, unknown>).group;
+  if (g && typeof g === "object") return g as Record<string, unknown>;
+  return null;
+}
+
+function schedulableBlockTimes(entry: HitchkickScheduleEntry): { start: Date; end: Date } | null {
+  const o = entry as Record<string, unknown>;
+  const group = scheduleEntryGroup(entry);
+
+  let start =
+    parseISO8601(String(o.startTime ?? "")) ||
+    (group ? parseISO8601(String(group.startTime ?? "")) : null);
+
+  let end =
+    parseISO8601(String(o.endTime ?? "")) ||
+    (group ? parseISO8601(String(group.endTime ?? "")) : null);
+
+  if (start && !end) {
+    const totalMs = (group ? jsonInt(group.totalTime) : null) ?? jsonInt(o.totalTime);
+    if (totalMs != null && totalMs > 0) {
+      end = new Date(start.getTime() + totalMs);
+    }
+  }
+
+  if (!start || !end) return null;
+  return { start, end };
+}
+
+function timelineBlockKindFromType(typeRaw: unknown): TimelineBlockKind | null {
+  const t = String(typeRaw ?? "").trim().toLowerCase();
+  if (t === "routine") return null;
+  if (!t) return null;
+  if (t === "break") return "break";
+  if (t === "award" || t === "awards") return "award";
+  return "other";
+}
+
+function timelineBlockKindFromEntry(entry: HitchkickScheduleEntry): TimelineBlockKind | null {
+  const fromEntry = timelineBlockKindFromType(entry.type);
+  if (fromEntry != null) return fromEntry;
+  const group = scheduleEntryGroup(entry);
+  if (!group) return null;
+  return timelineBlockKindFromType(group.type);
+}
+
+function blockLabelFromEntry(
+  entry: HitchkickScheduleEntry,
+  kind: TimelineBlockKind,
+  start: Date,
+  end: Date
+): string {
+  const o = entry as Record<string, unknown>;
+  const group = scheduleEntryGroup(entry);
+  /**
+   * Hitchkick puts `displayName` on the schedule entry root for breaks/awards; nested `group` may
+   * duplicate it or be omitted after pruning — always prefer entry.displayName first.
+   */
+  const candidates: unknown[] = [
+    o.displayName,
+    group?.displayName,
+    group?.name,
+    group?.title,
+    o.title,
+    o.name,
+    o.label,
+    o.description,
+    o.notes,
+    o.note,
+  ];
+  let base = "";
+  for (const p of candidates) {
+    const s = typeof p === "string" ? p.trim() : jsonString(p).trim();
+    if (s) {
+      base = s;
+      break;
+    }
+  }
+  if (!base) {
+    base =
+      kind === "break"
+        ? "Break"
+        : kind === "award"
+          ? "Awards"
+          : String(o.type ?? group?.type ?? "Schedule block");
+  }
+  if (kind === "break") {
+    let mins = Math.max(0, Math.round((end.getTime() - start.getTime()) / 60_000));
+    if (mins <= 0) {
+      const totalMs = jsonInt(group?.totalTime) ?? jsonInt(o.totalTime);
+      if (totalMs != null && totalMs > 0) {
+        mins = Math.max(1, Math.round(totalMs / 60_000));
+      }
+    }
+    if (mins > 0 && !/\(\s*break/i.test(base)) {
+      return `${base} (Break, ${mins} min)`;
+    }
+  }
+  return base;
+}
+
+/**
+ * Hitchkick schedule rows that are not performances (breaks, award sessions, etc.).
+ * Uses entry and nested `group` (`displayName`, `type`, `totalTime`, `startTime`/`endTime`, `clusterId`).
+ * Requires resolvable `start`/`end` (entry or group times, or start + `group.totalTime`) and `stage.stageNum`.
+ */
+export function buildScheduledTimelineBlocks(
+  entries: HitchkickScheduleEntry[],
+  eventTimeZone?: string
+): ScheduledTimelineBlock[] {
+  const tz = eventTimeZone?.trim();
+  const out: ScheduledTimelineBlock[] = [];
+  for (const entry of entries) {
+    const kind = timelineBlockKindFromEntry(entry);
+    if (kind == null) continue;
+    const times = schedulableBlockTimes(entry);
+    if (!times) continue;
+    const group = scheduleEntryGroup(entry);
+    const stage = entry.stage as Record<string, unknown> | undefined;
+    const cluster = entry.cluster as Record<string, unknown> | undefined;
+    const stageNum = jsonInt(stage?.stageNum);
+    if (stageNum == null) continue;
+    const id = jsonString(entry.id);
+    if (!id) continue;
+    const start = times.start;
+    const end = times.end;
+    const dayKey = tz ? localCalendarDayKey(start, tz) : utcDayKey(start);
+    let ci = jsonString(cluster?.clusterIndex);
+    if (!ci.trim() && group) ci = jsonString(group.clusterId);
+    const clusterIndex = ci.trim() === "" ? "_" : ci;
+
+    const rawType = String(entry.type ?? group?.type ?? "");
+
+    out.push({
+      scheduleEntryId: id,
+      kind,
+      label: blockLabelFromEntry(entry, kind, start, end),
+      stageNum,
+      clusterIndex,
+      calendarDayKey: dayKey,
+      start,
+      end,
+      rawType,
     });
   }
   return out;

@@ -48,6 +48,7 @@ export {
   buildRowStartsFromAll,
   flattenScheduledRoutinesTimelineReadOrder,
   routinesByStageAndStart,
+  timelineBlockLayout,
   type TimelineGroupModel,
 } from "./timelineGroups";
 export { reorderTimelineInsertBefore, reorderTimelineInsertAtEdge, swapRoutineSlotsByEntryId } from "./timelineSwap";
@@ -63,6 +64,7 @@ export {
   sortBucketRows,
   countBreaksInEntries,
   buildScheduledRoutines,
+  buildScheduledTimelineBlocks,
   analyzeSchedule,
   analyzePlannerDraftSchedule,
   plannerDraftScoreForLocalSearch,

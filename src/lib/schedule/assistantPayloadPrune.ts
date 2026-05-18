@@ -109,6 +109,7 @@ function pruneParentRoutine(parent: Record<string, unknown>, opts: HitchkickPayl
 
 function pruneScheduleEntry(e: HitchkickScheduleEntry, opts: HitchkickPayloadPruneOptions): Record<string, unknown> {
   const t = String(e.type ?? "");
+  const ent = e as Record<string, unknown>;
   const base: Record<string, unknown> = {
     id: e.id,
     type: e.type,
@@ -117,6 +118,22 @@ function pruneScheduleEntry(e: HitchkickScheduleEntry, opts: HitchkickPayloadPru
     startTime: e.startTime,
     endTime: e.endTime,
   };
+  if (t !== "routine") {
+    if (ent.displayName !== undefined && ent.displayName !== null) base.displayName = ent.displayName;
+    if (ent.totalTime !== undefined && ent.totalTime !== null) base.totalTime = ent.totalTime;
+    const grp = ent.group;
+    if (grp && typeof grp === "object") {
+      const g = grp as Record<string, unknown>;
+      base.group = {
+        type: g.type,
+        displayName: g.displayName,
+        totalTime: g.totalTime,
+        clusterId: g.clusterId,
+        startTime: g.startTime,
+        endTime: g.endTime,
+      };
+    }
+  }
   if (e.stage && typeof e.stage === "object") {
     const st = e.stage as Record<string, unknown>;
     base.stage = { name: st.name, stageNum: st.stageNum };
