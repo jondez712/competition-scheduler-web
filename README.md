@@ -14,11 +14,11 @@ Copy `.env.example` to `.env.local` and set:
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `HITCHKICK_PROXY_BASE` | Recommended | Base URL of your proxy (e.g. `https://…/hitchkick-proxy` without trailing path segments). The app requests `{BASE}/competition/{id}`. |
-| `HITCHKICK_DIRECT_BASE` | Optional fallback | Direct Hitchkick base, e.g. `https://hitchkick.com/api/external/event/schedule/competition` |
+| `HITCHKICK_DIRECT_BASE` | Optional fallback | Direct Hitchkick schedule API base (path segments only—match the URL the macOS app uses for `/table`, without `/table`). |
 | `HITCHKICK_API_KEY` | If using direct | API key appended as `key=` on the direct URL |
 | `OPENAI_SCHEDULE_ENABLED` | Optional | Set to `1`, `true`, `yes`, or `on` to **attempt OpenAI** draft scheduling when `OPENAI_API_KEY` is set. If unset or false, **only the heuristic** runs (default). |
 | `OPENAI_API_KEY` | Optional | Required for OpenAI draft attempts when `OPENAI_SCHEDULE_ENABLED` is on. Ignored for routing when AI is disabled. |
-| `OPENAI_SCHEDULE_MODEL` | Optional | Defaults to **`gpt-4o`**. For max quality / harder layouts try **`gpt-5.5`** (higher cost); budget: **`gpt-4o-mini`**. |
+| `OPENAI_SCHEDULE_MODEL` | Optional | Overrides the default model name for draft scheduling; leave unset to use the app default in code. |
 | `OPENAI_SCHEDULE_TEMPERATURE` | Optional | Sampling 0–2; default `0.15` (lower = steadier layout). |
 
 Secrets stay on the server: **do not** prefix any secret with `NEXT_PUBLIC_*`.
