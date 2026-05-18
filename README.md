@@ -71,7 +71,7 @@ npm run deploy:netlify   # after `npx netlify-cli login` + `npx netlify-cli init
 4. **Environment variables** — **Site configuration → Environment variables**. Add the same keys you use in `.env.local` (see **Configuration** above). Minimum for schedules to load:
    - `HITCHKICK_PROXY_BASE` — your proxy base URL (no trailing slash).
    - Optional: `HITCHKICK_DIRECT_BASE`, `HITCHKICK_API_KEY` if you use direct Hitchkick fallback.
-   - Optional AI: `OPENAI_API_KEY`, `OPENAI_SCHEDULE_ASSISTANT_MODEL`, `OPENAI_SCHEDULE_ASSISTANT_TEMPERATURE`, `OPENAI_SCHEDULE_ASSISTANT_MAX_JSON_CHARS`, plus draft vars (`OPENAI_SCHEDULE_ENABLED`, `OPENAI_SCHEDULE_MODEL`, etc.) if you use `/api/schedule/build-draft` with OpenAI.  
+   - Optional AI: `OPENAI_API_KEY` plus any assistant/draft tuning vars you use in production (names are documented in code under `src/lib/openaiAssistantEnvKeys.ts` and `src/lib/schedule/aiSchedule.ts`).  
    Use **Scopes:** at least **Production**; add **Deploy Previews** if you want previews to work the same way.
 5. **Deploy site**. Open the production URL; try **`/competition/7`** (or another id from `src/lib/competitions.ts`). If the schedule API returns errors, check the deploy **Functions** logs and confirm env vars are set (no typos, values match local).
 

@@ -99,7 +99,7 @@ function assistantFailureBubble(status: number, err?: string): string {
     return "The assistant is not configured on the server (missing OPENAI_API_KEY). Add it to .env.local and restart.";
   }
   if (/context_length|maximum context|context_length_exceeded/.test(e)) {
-    return "This event is too large for one assistant request right now. Clear the chat above, or lower OPENAI_SCHEDULE_ASSISTANT_MAX_JSON_CHARS in .env.local (for example 35000) and restart the dev server.";
+    return "This event is too large for one assistant request right now. Clear the chat above, or lower the assistant JSON size budget in .env.local (see openaiAssistantEnvKeys in the repo — try e.g. 35000) and restart the dev server.";
   }
   if (status === 401 || /invalid.*api key|incorrect api key/.test(e)) {
     return "OpenAI rejected the API key. Check OPENAI_API_KEY.";

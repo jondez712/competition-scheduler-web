@@ -7,6 +7,7 @@ import {
 } from "@/lib/schedule/assistantPayloadPrune";
 import type { ScheduledRoutine } from "@/lib/schedule/types";
 import { intervalsOverlap } from "@/lib/schedule/timeParsing";
+import { openaiAssistantEnvKeys } from "@/lib/openaiAssistantEnvKeys";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -262,10 +263,10 @@ function findingsSummary(rows: ScheduledRoutine[], timeZone: string): string {
 
 /**
  * Target max characters for pruned Hitchkick JSON in the user message (leaves room for TSV + system + history).
- * Override with OPENAI_SCHEDULE_ASSISTANT_MAX_JSON_CHARS (10000–400000).
+ * Optional env override: 10000–400000 (key is defined in `openaiAssistantEnvKeys`).
  */
 function assistantJsonCharBudget(): number {
-  const raw = env("OPENAI_SCHEDULE_ASSISTANT_MAX_JSON_CHARS");
+  const raw = env(openaiAssistantEnvKeys.maxJsonChars);
   const n = raw ? Number(raw) : NaN;
   if (Number.isFinite(n) && n >= 10_000 && n <= 400_000) return Math.floor(n);
   return 55_000;
@@ -346,8 +347,8 @@ export async function POST(request: Request) {
 Locked studios (automated edits): Staff locked these competing studios — do **not** put any routine from these studios in "operations". The UI rejects swaps that move them: ${lockedStudiosList.join("; ")}.`
       : "";
 
-  const model = env("OPENAI_SCHEDULE_ASSISTANT_MODEL") ?? "gpt-4o-mini";
-  const tempRaw = env("OPENAI_SCHEDULE_ASSISTANT_TEMPERATURE");
+  const model = env(openaiAssistantEnvKeys.model) ?? "gpt-4o-mini";
+  const tempRaw = env(openaiAssistantEnvKeys.temperature);
   let temperature: number | undefined;
   if (modelAllowsCustomTemperature(model)) {
     if (
