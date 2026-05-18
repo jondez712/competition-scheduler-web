@@ -5,6 +5,13 @@ function env(name: string): string | undefined {
   return v && v.trim() !== "" ? v.trim() : undefined;
 }
 
+function envTruthy(name: string): boolean {
+  const v = env(name);
+  if (!v) return false;
+  const t = v.toLowerCase();
+  return t === "1" || t === "true" || t === "yes" || t === "on";
+}
+
 /** Appended to configuration errors so local vs hosted deploys are both covered. */
 export function hitchkickEnvSetupHint(): string {
   return (
@@ -71,13 +78,9 @@ function buildFetchErrorMessage(
 }
 
 /**
- * Tries proxy first when `HITCHKICK_PROXY_BASE` is set; otherwise tries direct.
- * If proxy is set but fails, falls back to direct when configured (same as macOS retry).
- *
- * When **both** proxy and direct (`HITCHKICK_DIRECT_BASE` + `HITCHKICK_API_KEY`) are set,
- * requests are **raced** with `Promise.any`: whichever source responds successfully first wins.
- * On hosts with a ~30s gateway limit (e.g. Netlify + large competitions), the slower hop
- * no longer consumes the entire budget before the faster path can return.
+ * Loads schedule JSON: optional proxy, optional direct API, or `HITCHKICK_SCHEDULE_SKIP_PROXY` for direct-only
+ * (avoids wasting the serverless budget on a proxy that returns 504 for huge events).
+ * When both proxy and direct are set (and skip-proxy is off), requests are raced with `Promise.any`.
  */
 export async function fetchScheduleForCompetition(
   competitionId: number
@@ -87,6 +90,17 @@ export async function fetchScheduleForCompetition(
   const apiKey = env("HITCHKICK_API_KEY");
 
   const errors: string[] = [];
+
+  if (envTruthy("HITCHKICK_SCHEDULE_SKIP_PROXY")) {
+    if (!directBase || !apiKey) {
+      throw new Error(
+        `HITCHKICK_SCHEDULE_SKIP_PROXY is set but direct Hitchkick is not configured. ${hitchkickEnvSetupHint()}`
+      );
+    }
+    const base = directBase.replace(/\/$/, "");
+    const url = `${base}/${competitionId}/table?danceDigital=true&key=${encodeURIComponent(apiKey)}`;
+    return await fetchJson(url);
+  }
 
   const tryProxy = async (): Promise<HitchkickScheduleResponse | undefined> => {
     if (!proxyBase) return undefined;

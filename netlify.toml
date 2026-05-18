@@ -6,12 +6,13 @@
 # Set server-only env in Netlify: Site settings → Environment variables (see .env.example).
 #   HITCHKICK_PROXY_BASE (+ optional HITCHKICK_DIRECT_BASE / HITCHKICK_API_KEY, OPENAI_*, HITCHKICK_PUBLISH_PROXY_BASE).
 #
-# Schedule GET runs in a Netlify serverless function; the edge/gateway often cuts off around ~30s
-# (see request logs: Next.js handler ~30000ms → 502). Large competitions need a fast Hitchkick path.
-# Mitigations:
-#   Set HITCHKICK_DIRECT_BASE + HITCHKICK_API_KEY alongside HITCHKICK_PROXY_BASE: the app races both
-#   and uses whichever responds first (avoids spending the whole budget on the slower hop).
-#   Upgrade for longer function duration if you still hit limits after that.
+# Functions timeout: Netlify’s default for *synchronous* serverless handlers is often **60 seconds**
+# for sites created after Oct 4, 2023 (plan/site age may vary — see Functions overview). Next.js
+# `export const maxDuration` on a route is capped by whatever Netlify allows. Very large Hitchkick
+# JSON (download + parse + prune) can still exceed that; use `HITCHKICK_SCHEDULE_SKIP_PROXY=1` when
+# the proxy returns 504. **Background functions** (15 min) do not help a single HTTP request —
+# you’d need an async job + poll pattern for loads longer than the sync cap.
+# https://docs.netlify.com/build/functions/overview/
 
 [build]
   command = "npm run build"

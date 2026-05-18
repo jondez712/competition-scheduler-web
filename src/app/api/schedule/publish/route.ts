@@ -12,7 +12,7 @@ import { computeBaselineRevision } from "@/lib/schedule/scheduleSessionCore";
 import type { ScheduledRoutine } from "@/lib/schedule/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 900;
 
 type SerializedRoutine = Omit<ScheduledRoutine, "start" | "end"> & {
   start: string;

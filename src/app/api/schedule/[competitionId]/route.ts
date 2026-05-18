@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 import { fetchScheduleForCompetition } from "@/lib/hitchkick/serverFetch";
 import { lightenHitchkickScheduleResponseForClient } from "@/lib/schedule/assistantPayloadPrune";
 
-/** Large Hitchkick exports need headroom for proxy + JSON.stringify + slimmed response. */
-export const maxDuration = 120;
+/** Large Hitchkick exports can exceed default sync function time; `maxDuration` is capped by Netlify’s plan. */
+export const maxDuration = 900;
 
 type RouteParams = { params: Promise<{ competitionId: string }> };
 
@@ -30,8 +30,8 @@ export async function GET(_request: Request, { params }: RouteParams) {
     const hint = configMsg
       ? undefined
       : [
-          "502 — Hitchkick or your proxy failed, the competition id may be wrong, or the host timed out before returning JSON (Netlify Starter often limits serverless work to ~10s).",
-          "Very large events (3000+ routines) need more time; this route returns a pruned response under typical host limits. If it still fails: set HITCHKICK_DIRECT_BASE + HITCHKICK_API_KEY on Netlify, confirm HITCHKICK_PROXY_BASE, or upgrade for longer function duration.",
+          "502 — Hitchkick or your proxy failed, the competition id may be wrong, or Netlify ended the function before JSON returned. Netlify sync functions often allow ~60s for newer sites; large payloads still need direct Hitchkick + skip-proxy — see netlify.toml.",
+          "Very large events (3000+ routines): proxy 504 is an upstream timeout; set HITCHKICK_SCHEDULE_SKIP_PROXY=1 with HITCHKICK_DIRECT_BASE + HITCHKICK_API_KEY so work is one slow fetch, not proxy + race. If you still exceed your plan’s sync limit, only a shorter payload, faster upstream, or async fetch (background job + poll) fixes it.",
         ].join(" ");
     return NextResponse.json({ error: msg, ...(hint ? { hint } : {}) }, { status: 502 });
   }
