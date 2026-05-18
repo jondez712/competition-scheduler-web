@@ -137,6 +137,8 @@ export function mergedRoutineClassification(parent: Record<string, unknown>): {
 }
 
 export function studioNameFromParent(parent: Record<string, unknown>): string {
+  const fromPruned = String(parent.studioName ?? "").trim();
+  if (fromPruned) return fromPruned;
   const fromReg = (reg: Record<string, unknown> | undefined): string => {
     const studios = reg?.studios as Record<string, unknown> | undefined;
     return (studios?.businessName as string) ?? "";

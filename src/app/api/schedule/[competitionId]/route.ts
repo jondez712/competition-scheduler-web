@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { fetchScheduleForCompetition } from "@/lib/hitchkick/serverFetch";
+import { lightenHitchkickScheduleResponseForClient } from "@/lib/schedule/assistantPayloadPrune";
 
-/** Netlify maps this where supported; avoids sub-second defaults on some hosts. */
-export const maxDuration = 60;
+/** Large Hitchkick exports need headroom for proxy + JSON.stringify + slimmed response. */
+export const maxDuration = 120;
 
 type RouteParams = { params: Promise<{ competitionId: string }> };
 
@@ -15,7 +16,8 @@ export async function GET(_request: Request, { params }: RouteParams) {
 
   try {
     const data = await fetchScheduleForCompetition(id);
-    return NextResponse.json(data);
+    const forClient = lightenHitchkickScheduleResponseForClient(data);
+    return NextResponse.json(forClient);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     if (process.env.NODE_ENV === "development") {
@@ -29,7 +31,7 @@ export async function GET(_request: Request, { params }: RouteParams) {
       ? undefined
       : [
           "502 — Hitchkick or your proxy failed, the competition id may be wrong, or the host timed out before returning JSON (Netlify Starter often limits serverless work to ~10s).",
-          "Mitigations: add HITCHKICK_DIRECT_BASE + HITCHKICK_API_KEY on Netlify for a direct API fallback; confirm HITCHKICK_PROXY_BASE; upgrade for longer function duration.",
+          "Very large events (3000+ routines) need more time; this route returns a pruned response under typical host limits. If it still fails: set HITCHKICK_DIRECT_BASE + HITCHKICK_API_KEY on Netlify, confirm HITCHKICK_PROXY_BASE, or upgrade for longer function duration.",
         ].join(" ");
     return NextResponse.json({ error: msg, ...(hint ? { hint } : {}) }, { status: 502 });
   }

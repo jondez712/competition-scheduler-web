@@ -146,8 +146,17 @@ export function buildScheduledRoutines(
     const dayKey = tz ? localCalendarDayKey(start, tz) : utcDayKey(start);
     const entry = byId.get(r.scheduleEntryId) ?? {};
     const pr = (entry.parentRoutine as Record<string, unknown>) ?? {};
-    const dancers = rosterDancerIds(pr);
-    const dancerNames = rosterDancerDisplayNames(pr);
+    let dancers: string[];
+    let dancerNames: string[];
+    const prunedIds = pr.rosterDancerIds;
+    const prunedNames = pr.rosterDancerNames;
+    if (Array.isArray(prunedIds) && Array.isArray(prunedNames)) {
+      dancers = prunedIds.map((x) => String(x));
+      dancerNames = prunedNames.map((x) => String(x));
+    } else {
+      dancers = rosterDancerIds(pr);
+      dancerNames = rosterDancerDisplayNames(pr);
+    }
 
     out.push({
       scheduleEntryId: r.scheduleEntryId,

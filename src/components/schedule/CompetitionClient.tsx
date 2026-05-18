@@ -325,7 +325,6 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
           schedule: serializeScheduleForApi(scheduleSession.draft),
           timeZone: displayTimeZone,
           baselineRevision: scheduleSession.baselineRevision,
-          hitchkickPayload,
         }),
       });
       const data = (await res.json()) as HitchkickScheduleResponse & {
@@ -389,7 +388,6 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
     scheduleSession,
     competitionId,
     displayTimeZone,
-    hitchkickPayload,
     competitionEntry?.timeZone,
   ]);
 

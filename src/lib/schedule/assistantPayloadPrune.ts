@@ -1,4 +1,4 @@
-import type { HitchkickScheduleEntry } from "@/lib/hitchkick/types";
+import type { HitchkickScheduleEntry, HitchkickScheduleResponse } from "@/lib/hitchkick/types";
 import { choreographerFromParent, jsonString, aotySegmentFromParent } from "@/lib/schedule/parse";
 
 /**
@@ -119,6 +119,30 @@ export function pruneHitchkickPayloadForAssistant(payload: unknown): unknown {
     if (typeof v === "string" || typeof v === "number") out[key] = v;
   }
   return out;
+}
+
+/**
+ * Netlify buffers synchronous function responses around ~6 MB; raw Hitchkick JSON for 3000+ routines
+ * can exceed that or take long to serialize. Keep pruned scheduleEntries plus lightweight scalar
+ * payload metadata. Timeline + assistant still work; publish merges using a fresh full fetch.
+ */
+export function lightenHitchkickScheduleResponseForClient(
+  data: HitchkickScheduleResponse
+): HitchkickScheduleResponse {
+  const pl = data.payload;
+  if (!pl || typeof pl !== "object") return data;
+  const p = pl as Record<string, unknown>;
+  const prunedInner = pruneHitchkickPayloadForAssistant(pl) as Record<string, unknown>;
+  const litePayload: Record<string, unknown> = { ...prunedInner };
+  for (const k of Object.keys(p)) {
+    if (k === "scheduleEntries") continue;
+    if (litePayload[k] !== undefined) continue;
+    const v = p[k];
+    if (v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+      litePayload[k] = v;
+    }
+  }
+  return { ...data, payload: litePayload };
 }
 
 /**

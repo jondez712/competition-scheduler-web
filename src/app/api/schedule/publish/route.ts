@@ -24,7 +24,7 @@ type Body = {
   schedule?: SerializedRoutine[];
   timeZone?: string;
   baselineRevision?: string;
-  /** Same loose shape the client caches for the assistant (`payload` or full response). */
+  /** Ignored: merge always uses a fresh Hitchkick fetch so pruned GET payloads cannot strip publish data. */
   hitchkickPayload?: unknown;
 };
 
@@ -62,17 +62,8 @@ function deserializeSchedule(raw: SerializedRoutine[] | undefined): ScheduledRou
   return out;
 }
 
-function mergeRootForPublish(
-  fresh: HitchkickScheduleResponse,
-  clientPayload: unknown | undefined,
-  draft: ScheduledRoutine[]
-): unknown {
-  const root =
-    clientPayload != null && typeof clientPayload === "object"
-      ? clientPayload
-      : fresh.payload != null
-        ? { payload: fresh.payload }
-        : fresh;
+function mergeRootForPublish(fresh: HitchkickScheduleResponse, draft: ScheduledRoutine[]): unknown {
+  const root = fresh.payload != null ? { payload: fresh.payload } : fresh;
   return mergeDraftRoutinesIntoHitchkickPayload(root, draft);
 }
 
@@ -122,7 +113,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const mergedRoot = mergeRootForPublish(fresh, body.hitchkickPayload, draft);
+  const mergedRoot = mergeRootForPublish(fresh, draft);
 
   const publishBase = getHitchkickPublishBase();
   try {

@@ -49,9 +49,35 @@ function summarizeUrl(url: string): string {
   }
 }
 
+function buildFetchErrorMessage(
+  errors: string[],
+  proxyBase: string | undefined,
+  directBase: string | undefined,
+  apiKey: string | undefined
+): string {
+  let msg = errors.join(" • ");
+  const proxyFailed = errors.some((e) => e.startsWith("proxy ("));
+  if (proxyFailed && directBase && !apiKey) {
+    msg +=
+      " — Proxy failed and direct Hitchkick was not used: add HITCHKICK_API_KEY in .env.local or your host env (same key the macOS app uses), then restart or redeploy.";
+  } else if (proxyFailed && !directBase) {
+    msg +=
+      " — Tip: set HITCHKICK_DIRECT_BASE (see .env.example) and HITCHKICK_API_KEY so the app can fall back when the proxy returns 5xx.";
+  } else if (proxyFailed && directBase && apiKey && errors.some((e) => e.startsWith("direct"))) {
+    msg +=
+      " — Both proxy and direct Hitchkick failed; check the key, network, or whether this competition id is valid.";
+  }
+  return msg;
+}
+
 /**
  * Tries proxy first when `HITCHKICK_PROXY_BASE` is set; otherwise tries direct.
  * If proxy is set but fails, falls back to direct when configured (same as macOS retry).
+ *
+ * When **both** proxy and direct (`HITCHKICK_DIRECT_BASE` + `HITCHKICK_API_KEY`) are set,
+ * requests are **raced** with `Promise.any`: whichever source responds successfully first wins.
+ * On hosts with a ~30s gateway limit (e.g. Netlify + large competitions), the slower hop
+ * no longer consumes the entire budget before the faster path can return.
  */
 export async function fetchScheduleForCompetition(
   competitionId: number
@@ -85,11 +111,40 @@ export async function fetchScheduleForCompetition(
     }
   };
 
-  const fromProxy = await tryProxy();
-  if (fromProxy) return fromProxy;
+  if (proxyBase && directBase && apiKey) {
+    const proxyUrl = `${proxyBase.replace(/\/$/, "")}/competition/${competitionId}`;
+    const base = directBase.replace(/\/$/, "");
+    const directUrl = `${base}/${competitionId}/table?danceDigital=true&key=${encodeURIComponent(apiKey)}`;
 
-  const fromDirect = await tryDirect();
-  if (fromDirect) return fromDirect;
+    const pProxy = fetchJson(proxyUrl).catch((e) => {
+      throw new Error(
+        `proxy (${summarizeUrl(proxyUrl)}): ${e instanceof Error ? e.message : String(e)}`
+      );
+    });
+    const pDirect = fetchJson(directUrl).catch((e) => {
+      throw new Error(
+        `direct (${summarizeUrl(directUrl)}): ${e instanceof Error ? e.message : String(e)}`
+      );
+    });
+
+    try {
+      return await Promise.any([pProxy, pDirect]);
+    } catch (e) {
+      if (e instanceof AggregateError && Array.isArray(e.errors)) {
+        for (const err of e.errors) {
+          errors.push(err instanceof Error ? err.message : String(err));
+        }
+      } else {
+        errors.push(e instanceof Error ? e.message : String(e));
+      }
+    }
+  } else {
+    const fromProxy = await tryProxy();
+    if (fromProxy) return fromProxy;
+
+    const fromDirect = await tryDirect();
+    if (fromDirect) return fromDirect;
+  }
 
   if (!proxyBase && !directBase) {
     throw new Error(`No Hitchkick URL configured. ${hitchkickEnvSetupHint()}`);
@@ -103,18 +158,5 @@ export async function fetchScheduleForCompetition(
     throw new Error(`Could not load schedule. ${hitchkickEnvSetupHint()}`);
   }
 
-  let msg = errors.join(" • ");
-  const proxyFailed = errors.some((e) => e.startsWith("proxy ("));
-  if (proxyFailed && directBase && !apiKey) {
-    msg +=
-      " — Proxy failed and direct Hitchkick was not used: add HITCHKICK_API_KEY in .env.local or your host env (same key the macOS app uses), then restart or redeploy.";
-  } else if (proxyFailed && !directBase) {
-    msg +=
-      " — Tip: set HITCHKICK_DIRECT_BASE (see .env.example) and HITCHKICK_API_KEY so the app can fall back when the proxy returns 5xx.";
-  } else if (proxyFailed && directBase && apiKey && errors.some((e) => e.startsWith("direct:"))) {
-    msg +=
-      " — Both proxy and direct Hitchkick failed; check the key, network, or whether this competition id is valid.";
-  }
-
-  throw new Error(msg);
+  throw new Error(buildFetchErrorMessage(errors, proxyBase, directBase, apiKey));
 }
