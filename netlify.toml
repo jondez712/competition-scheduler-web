@@ -18,3 +18,6 @@
 
 [build.environment]
   NODE_VERSION = "20"
+  # OpenAI “tuning” env values often match harmless defaults in code; omit from value scanning.
+  # https://ntl.fyi/configure-secrets-scanning
+  SECRETS_SCAN_OMIT_KEYS = "OPENAI_SCHEDULE_ASSISTANT_MODEL,OPENAI_SCHEDULE_MODEL,OPENAI_SCHEDULE_TEMPERATURE"

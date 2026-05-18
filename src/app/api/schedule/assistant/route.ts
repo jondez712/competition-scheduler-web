@@ -7,6 +7,7 @@ import {
 } from "@/lib/schedule/assistantPayloadPrune";
 import type { ScheduledRoutine } from "@/lib/schedule/types";
 import { intervalsOverlap } from "@/lib/schedule/timeParsing";
+import { defaultAssistantChatModelId } from "@/lib/openaiDefaultModelIds";
 import { openaiAssistantEnvKeys } from "@/lib/openaiAssistantEnvKeys";
 
 export const runtime = "nodejs";
@@ -347,7 +348,7 @@ export async function POST(request: Request) {
 Locked studios (automated edits): Staff locked these competing studios — do **not** put any routine from these studios in "operations". The UI rejects swaps that move them: ${lockedStudiosList.join("; ")}.`
       : "";
 
-  const model = env(openaiAssistantEnvKeys.model) ?? "gpt-4o-mini";
+  const model = env(openaiAssistantEnvKeys.model) ?? defaultAssistantChatModelId();
   const tempRaw = env(openaiAssistantEnvKeys.temperature);
   let temperature: number | undefined;
   if (modelAllowsCustomTemperature(model)) {
@@ -359,7 +360,7 @@ Locked studios (automated edits): Staff locked these competing studios — do **
     ) {
       temperature = Number(tempRaw);
     } else {
-      temperature = 0.3;
+      temperature = 3 / 10;
     }
   }
 

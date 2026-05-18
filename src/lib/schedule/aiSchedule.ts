@@ -13,6 +13,7 @@ import {
   type BuiltDraftSchedule,
   type ScheduleMatrixRow,
 } from "@/lib/schedule/scheduleBuilder";
+import { defaultDraftScheduleModelId } from "@/lib/openaiDefaultModelIds";
 
 function env(name: string): string | undefined {
   const v = process.env[name];
@@ -79,9 +80,10 @@ export function compactScheduleAiTsv(routines: RegisteredRoutine[]): string {
 
 function scheduleAiTemperature(): number {
   const raw = env("OPENAI_SCHEDULE_TEMPERATURE");
-  if (!raw) return 0.15;
+  const fallback = 15 / 100;
+  if (!raw) return fallback;
   const n = Number(raw);
-  if (!Number.isFinite(n) || n < 0 || n > 2) return 0.15;
+  if (!Number.isFinite(n) || n < 0 || n > 2) return fallback;
   return n;
 }
 
@@ -115,7 +117,7 @@ export async function tryBuildScheduleWithOpenAI(
   if (!apiKey || !openAiScheduleEnabled()) return null;
 
   const fixed = options?.fixedStageColumnIndex;
-  const model = env("OPENAI_SCHEDULE_MODEL") ?? "gpt-4o";
+  const model = env("OPENAI_SCHEDULE_MODEL") ?? defaultDraftScheduleModelId();
   const validIds = new Set(routines.map((r) => r.routineId));
 
   const sharedTail = `
