@@ -42,6 +42,28 @@ describe("assistantPayloadPrune", () => {
       (pruned.scheduleEntries[0]?.parentRoutine as { rosterDancerNames?: string[] }).rosterDancerNames
     ).toContain("Jane Doe");
     expect(pruned).not.toHaveProperty("heavy");
+    expect(pruned.scheduleEntries[0]?.parentRoutine?.aotySegment).toBe("");
+  });
+
+  it("preserves aotySegment from Hitchkick parentRoutine", () => {
+    const payload = {
+      scheduleEntries: [
+        {
+          id: "e1",
+          type: "routine",
+          parentRoutine: {
+            id: "p1",
+            title: "Solo",
+            aotySegment: "aoty_female",
+            submissionRoutines: [],
+          },
+        },
+      ],
+    };
+    const pruned = pruneHitchkickPayloadForAssistant(payload) as {
+      scheduleEntries: Array<{ parentRoutine?: { aotySegment?: string } }>;
+    };
+    expect(pruned.scheduleEntries[0]?.parentRoutine?.aotySegment).toBe("aoty_female");
   });
 
   it("caps roster arrays in parentRoutine", () => {

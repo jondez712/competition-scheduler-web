@@ -50,7 +50,14 @@ export {
   routinesByStageAndStart,
   type TimelineGroupModel,
 } from "./timelineGroups";
-export { reorderTimelineInsertBefore, swapRoutineSlotsByEntryId } from "./timelineSwap";
+export { reorderTimelineInsertBefore, reorderTimelineInsertAtEdge, swapRoutineSlotsByEntryId } from "./timelineSwap";
+export { optimizeImportedSchedule, type OptimizerOpts, type OptimizerResult, type SwapLogEntry } from "./importedScheduleOptimizer";
+export {
+  normalizeStudioLockKey,
+  studioLockKeysFromList,
+  isStudioLocked,
+  swapTouchesLockedStudio,
+} from "./studioLock";
 export {
   scheduledRoutineBucketKey,
   sortBucketRows,

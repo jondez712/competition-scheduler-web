@@ -4,8 +4,7 @@ import { analyzePlannerDraftSchedule } from "@/lib/schedule/analysis";
 import {
   fitJsonToCharBudget,
   pruneHitchkickPayloadForAssistant,
-} from "@/lib/schedule/assistantPayloadPrune";
-import type { ScheduledRoutine } from "@/lib/schedule/types";
+} from "@/lib/schedule/assistantPayloadPrune";import type { ScheduledRoutine } from "@/lib/schedule/types";
 import { intervalsOverlap } from "@/lib/schedule/timeParsing";
 
 export const runtime = "nodejs";
@@ -50,6 +49,8 @@ type Body = {
    * Same shape as GET /api/schedule/[id] `payload` — when provided, skips a second Hitchkick fetch (much faster).
    */
   hitchkickPayload?: unknown;
+  /** Studio names locked for automated edits — model should not propose swaps involving these studios. */
+  lockedStudios?: string[];
 };
 
 function deserializeSchedule(raw: SerializedRoutine[] | undefined): ScheduledRoutine[] {
@@ -63,11 +64,13 @@ function deserializeSchedule(raw: SerializedRoutine[] | undefined): ScheduledRou
     const rosterNames = Array.isArray(r.rosterDancerNames) ? r.rosterDancerNames : [];
     const rosterIds = Array.isArray(r.rosterDancerIds) ? r.rosterDancerIds : [];
     const choreographer = typeof r.choreographer === "string" ? r.choreographer.trim() : "";
+    const aotySegment = typeof r.aotySegment === "string" ? r.aotySegment.trim() : "";
     out.push({
       ...r,
       start,
       end,
       choreographer,
+      aotySegment,
       rosterDancerNames: rosterNames.map((x) => String(x)),
       rosterDancerIds: rosterIds.map((x) => String(x)),
     } as ScheduledRoutine);
@@ -117,7 +120,7 @@ function escCell(s: string, max = 96): string {
 /** Compact grid for the model: no roster name list (avoids 2× duplication with JSON); cap row length. */
 function scheduleTsvForAssistant(rows: ScheduledRoutine[], timeZone: string): string {
   const header =
-    "scheduleEntryId\troutineNumber\tstudio\tcalendarDayKey\tweekday\tstageNum\tstartLocal\tendLocal\tdancerCount\tlcd\tchoreographer\ttitle";
+    "scheduleEntryId\troutineNumber\tstudio\tcalendarDayKey\tweekday\tstageNum\tstartLocal\tendLocal\tdancerCount\tlcd\tchoreographer\taotySegment\ttitle";
   const lines: string[] = [];
   const fmt = (d: Date) =>
     new Intl.DateTimeFormat("en-US", {
@@ -146,6 +149,7 @@ function scheduleTsvForAssistant(rows: ScheduledRoutine[], timeZone: string): st
         String(dancers.length),
         escCell(lcd, 44),
         escCell(r.choreographer || "", 36),
+        escCell(r.aotySegment || "", 24),
         escCell(r.routineTitle || "", 48),
       ].join("\t")
     );
@@ -281,7 +285,7 @@ function formatHitchkickJsonBlock(
     const { json, truncated } = fitJsonToCharBudget(pruned, assistantJsonCharBudget());
     const head = `Hitchkick schedule data (competition ${competitionId}; ${entryCount} scheduleEntries in export; source=${source}; ${
       truncated ? "truncated to fit model context" : "full export after pruning"
-    }). Structured for Q&A: each entry has id (matches TSV scheduleEntryId), type, number, times, stage, cluster, and for routines parentRoutine with title, studioName (studio/business), choreographer (credited choreographer—person or name string; not the studio), level/category/division {name}, rosterDancerNames, rosterDancerIds. Heavy media/admin fields from the live API are stripped.\n`;
+    }). Structured for Q&A: each entry has id (matches TSV scheduleEntryId), type, number, times, stage, cluster, and for routines parentRoutine with title, studioName (studio/business), choreographer (credited choreographer—person or name string; not the studio), aotySegment when present (solo track: e.g. finals for Finals solos; aoty_female / aoty_male etc. for Artist of the Year at Nationals), level/category/division {name}, rosterDancerNames, rosterDancerIds. Heavy media/admin fields from the live API are stripped.\n`;
     return `\n\n${head}${json}\n`;
   } catch {
     return `\n\nHitchkick API payload: could not serialize (source=${source}).\n`;
@@ -327,6 +331,16 @@ export async function POST(request: Request) {
     body.timeZone?.trim() ||
     (typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC");
   const competitionName = body.competitionName?.trim() || "Event";
+
+  const lockedStudiosList = Array.isArray(body.lockedStudios)
+    ? [...new Set(body.lockedStudios.map((s) => String(s).trim()).filter(Boolean))]
+    : [];
+  const lockedStudiosInstruction =
+    lockedStudiosList.length > 0
+      ? `
+
+Locked studios (automated edits): Staff locked these competing studios — do **not** put any routine from these studios in "operations". The UI rejects swaps that move them: ${lockedStudiosList.join("; ")}.`
+      : "";
 
   const model = env("OPENAI_SCHEDULE_ASSISTANT_MODEL") ?? "gpt-4o-mini";
   const tempRaw = env("OPENAI_SCHEDULE_ASSISTANT_TEMPERATURE");
@@ -383,10 +397,10 @@ The user message includes:
 2) A **"Verified same-studio time overlaps"** section listing every pair of routines from the same studio on the same day whose time ranges truly intersect, or **None** if there are none. Use this for overlap yes/no questions about studios.
 3) A short **"Automated checks"** list (cross-stage travel gaps, group spacing hints, etc.). These are **not** the same as time overlap: a “short gap” warning does not mean two routines overlap.
 4) A compact TSV of timed routines:
-scheduleEntryId, routineNumber, studio, calendarDayKey, weekday, stageNum, startLocal, endLocal, dancerCount, lcd, choreographer, title.
-lcd = level › division › category (abbrev). **choreographer** is the credited choreographer for that schedule row (from Hitchkick). Dancer names are not in this TSV — use the Hitchkick JSON block (parentRoutine.rosterDancerNames, first 24; rosterNameCount when more).
+scheduleEntryId, routineNumber, studio, calendarDayKey, weekday, stageNum, startLocal, endLocal, dancerCount, lcd, choreographer, aotySegment, title.
+lcd = level › division › category (abbrev). **choreographer** is the credited choreographer for that schedule row (from Hitchkick). **aotySegment** is the Hitchkick solo track when present: typically **finals** for Finals solos vs **aoty_**… (e.g. **aoty_female**) for Artist of the Year—use it to distinguish those solo lines at Nationals. Dancer names are not in this TSV — use the Hitchkick JSON block (parentRoutine.rosterDancerNames, first 24; rosterNameCount when more).
 
-5) When present, a "Hitchkick schedule data" section is pruned API JSON: scheduleEntries with parentRoutine (title, studioName, choreographer, level/category/division names, rosterDancerNames/Ids). Entry id matches scheduleEntryId. If _assistantTruncated appears, fewer JSON entries fit — the TSV still lists timed rows (or is truncated last; the UI is authoritative).
+5) When present, a "Hitchkick schedule data" section is pruned API JSON: scheduleEntries with parentRoutine (title, studioName, choreographer, aotySegment, level/category/division names, rosterDancerNames/Ids). Entry id matches scheduleEntryId. If _assistantTruncated appears, fewer JSON entries fit — the TSV still lists timed rows (or is truncated last; the UI is authoritative).
 
 Choreographer vs studio (critical): **parentRoutine.choreographer** and the TSV **choreographer** column both describe the credited **choreographer** (usually a person’s name) for that routine row — prefer the **TSV choreographer** when answering about a specific **scheduleEntryId** or **routineNumber** slot. **parentRoutine.studioName** / TSV **studio** is the **competing studio / business name**. For **every** wording—“who choreographed”, “who choreographed [title]”, “choreographer for…”, “who made the piece”, etc.—answer with **choreographer** for that row (match by scheduleEntryId, routine number, or title). **Never** answer with the studio name unless the user explicitly asks for the studio or **choreographer** is missing/empty in the data (then say it isn’t listed and optionally mention the studio separately). **Never** guess choreographer from dancer roster names.
 
@@ -414,6 +428,7 @@ Rules:
 - Never invent scheduleEntryIds or routine numbers not present in the TSV.
 - Never claim a weekday or date is missing if it appears in the Calendar days section or in calendarDayKey/weekday columns.
 - Keep reply concise and actionable (plain text, no markdown code fences in reply).
+${lockedStudiosInstruction}
 
 You MUST respond with ONLY valid JSON (no prose outside JSON) in this exact shape:
 {"reply":"<string>","operations":[ ... ]}`;

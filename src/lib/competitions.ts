@@ -1,4 +1,9 @@
-export type Competition = { id: number; name: string; /** IANA timezone for schedule display */ timeZone?: string };
+export type Competition = {
+  id: number;
+  name: string;
+  /** IANA timezone for schedule display */
+  timeZone?: string;
+};
 
 /** Same list as macOS CompetitionFolderGenerator. `timeZone` drives timeline clocks/banners when set. */
 export const COMPETITIONS: Competition[] = [
@@ -22,4 +27,5 @@ export const COMPETITIONS: Competition[] = [
   { id: 18, name: "Kansas City", timeZone: "America/Chicago" },
   { id: 19, name: "Detroit", timeZone: "America/New_York" },
   { id: 20, name: "Buffalo", timeZone: "America/New_York" },
+  { id: 34, name: "Nationals", timeZone: "America/Los_Angeles" },
 ];

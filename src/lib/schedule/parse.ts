@@ -74,6 +74,31 @@ export function choreographerFromParent(parent: Record<string, unknown>): string
   return fallback;
 }
 
+/**
+ * Hitchkick `parentRoutine.aotySegment` (and title-matched submission fallback). Examples:
+ * `finals` (Finals solo), `aoty_female` / `aoty_male` (Artist of the Year tracks at Nationals).
+ */
+export function aotySegmentFromParent(parent: Record<string, unknown>): string {
+  const direct = jsonString(parent.aotySegment).trim();
+  if (direct) return direct;
+
+  const parentTitle = String(parent.title ?? "").trim().toLowerCase();
+  const subs = parent.submissionRoutines as unknown[] | undefined;
+  if (!Array.isArray(subs)) return "";
+
+  let fallback = "";
+  for (const sub of subs) {
+    if (typeof sub !== "object" || sub === null) continue;
+    const s = sub as Record<string, unknown>;
+    const seg = jsonString(s.aotySegment).trim();
+    if (!seg) continue;
+    const subTitle = String(s.title ?? "").trim().toLowerCase();
+    if (parentTitle && subTitle === parentTitle) return seg;
+    if (!fallback) fallback = seg;
+  }
+  return fallback;
+}
+
 function firstSubmissionRoutine(parent: Record<string, unknown>): Record<string, unknown> | null {
   const subs = parent.submissionRoutines;
   if (!Array.isArray(subs) || subs.length === 0) return null;
@@ -161,6 +186,7 @@ export function parseRoutinesFromEntries(entries: HitchkickScheduleEntry[]): Par
       divisionName: meta.divisionName,
       studioCode: "",
       studioName,
+      aotySegment: aotySegmentFromParent(parent),
     });
   }
 

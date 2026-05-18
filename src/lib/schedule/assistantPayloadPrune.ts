@@ -1,5 +1,5 @@
 import type { HitchkickScheduleEntry } from "@/lib/hitchkick/types";
-import { choreographerFromParent, jsonString } from "@/lib/schedule/parse";
+import { choreographerFromParent, jsonString, aotySegmentFromParent } from "@/lib/schedule/parse";
 
 /**
  * Strip heavy Hitchkick blobs (nested media, full registrations, etc.) while keeping fields the
@@ -57,6 +57,7 @@ function pruneParentRoutine(parent: Record<string, unknown>): Record<string, unk
     id: parent.id,
     title: parent.title,
     choreographer: choreographerFromParent(parent),
+    aotySegment: aotySegmentFromParent(parent),
     level: nameOnly(parent.level),
     category: nameOnly(parent.category),
     division: nameOnly(parent.division),

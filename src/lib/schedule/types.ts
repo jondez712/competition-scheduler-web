@@ -79,6 +79,8 @@ export type ParsedRoutine = {
   divisionName: string;
   studioCode: string;
   studioName: string;
+  /** Hitchkick `aotySegment` on parentRoutine (e.g. finals, aoty_female). */
+  aotySegment: string;
 };
 
 export type ScheduledRoutine = {
@@ -95,6 +97,8 @@ export type ScheduledRoutine = {
   routineTitle: string;
   /** Credited choreographer from Hitchkick parentRoutine (normalized string). */
   choreographer: string;
+  /** Hitchkick solo track: e.g. `finals` vs `aoty_female` (Nationals). */
+  aotySegment: string;
   categoryName: string;
   divisionName: string;
   levelName: string;

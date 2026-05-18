@@ -1,4 +1,5 @@
 import { swapRoutineSlotsByEntryId } from "@/lib/schedule/timelineSwap";
+import { swapTouchesLockedStudio } from "@/lib/schedule/studioLock";
 import type { ScheduledRoutine } from "@/lib/schedule/types";
 
 export type ScheduleAssistantOp =
@@ -38,13 +39,20 @@ function routinesAtDayNumber(
   return rows.filter((r) => r.calendarDayKey === dayKey && String(r.routineNumber).trim() === n);
 }
 
+export type ApplyAssistantOpsOptions = {
+  lockedStudioKeys?: ReadonlySet<string>;
+};
+
 /**
  * Apply model-proposed operations in order. Invalid ops are skipped with reasons (never throws).
  */
 export function applyScheduleAssistantOps(
   rows: ScheduledRoutine[],
-  ops: ScheduleAssistantOp[]
+  ops: ScheduleAssistantOp[],
+  options?: ApplyAssistantOpsOptions
 ): ApplyAssistantOpsResult {
+  const lockedStudioKeys = options?.lockedStudioKeys ?? new Set<string>();
+
   let next = cloneRows(rows);
   const applied: ScheduleAssistantOp[] = [];
   const skipped: Array<{ op: ScheduleAssistantOp; reason: string }> = [];
@@ -61,6 +69,16 @@ export function applyScheduleAssistantOps(
       const b = String(op.entryIdB ?? "").trim();
       if (!a || !b || a === b) {
         skipped.push({ op, reason: "swap_by_entry_id requires two different entry ids" });
+        continue;
+      }
+      const rowA = next.find((r) => r.scheduleEntryId === a);
+      const rowB = next.find((r) => r.scheduleEntryId === b);
+      if (
+        rowA &&
+        rowB &&
+        swapTouchesLockedStudio(rowA, rowB, lockedStudioKeys)
+      ) {
+        skipped.push({ op, reason: "Swap skipped: one or both studios are locked for automated edits" });
         continue;
       }
       const swapped = swapRoutineSlotsByEntryId(next, a, b);
@@ -101,6 +119,10 @@ export function applyScheduleAssistantOps(
       }
       const entryIdA = ma[0]!.scheduleEntryId;
       const entryIdB = mb[0]!.scheduleEntryId;
+      if (swapTouchesLockedStudio(ma[0]!, mb[0]!, lockedStudioKeys)) {
+        skipped.push({ op, reason: "Swap skipped: one or both studios are locked for automated edits" });
+        continue;
+      }
       const swapped = swapRoutineSlotsByEntryId(next, entryIdA, entryIdB);
       if (!swapped) {
         skipped.push({ op, reason: "Swap rejected after resolving routine numbers" });

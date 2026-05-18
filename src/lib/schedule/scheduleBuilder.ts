@@ -1120,6 +1120,7 @@ export function scheduledRoutinesFromDraftSlots(
       levelName: reg.levelName,
       rosterDancerNames: [...reg.rosterDancerNames],
       rosterDancerIds: [...reg.rosterDancerIds],
+      aotySegment: "",
     });
   }
   return { routines: out, timeLayoutError: null };

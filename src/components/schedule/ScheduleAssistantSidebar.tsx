@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ScheduledRoutine } from "@/lib/schedule/types";
+import { studioLockKeysFromList } from "@/lib/schedule/studioLock";
 import { applyScheduleAssistantOps, type ScheduleAssistantOp } from "@/lib/schedule/scheduleAssistantOps";
 
 type ChatMessage = { role: "user" | "assistant"; content: string };
@@ -92,6 +93,8 @@ export function ScheduleAssistantSidebar({
   schedule,
   onScheduleReplace,
   disabledReason,
+  pendingMessage,
+  lockedStudios = [],
 }: {
   competitionName: string;
   /** Passed to the server so it can attach the full Hitchkick JSON (GET /api/schedule/[id] shape). */
@@ -103,6 +106,12 @@ export function ScheduleAssistantSidebar({
   onScheduleReplace: (next: ScheduledRoutine[]) => void;
   /** When set, shows a notice instead of the composer (e.g. no API key — server returns 503). */
   disabledReason?: string | null;
+  /**
+   * When set, the sidebar opens and immediately sends this message as a user turn.
+   * The `id` field must change each time to trigger a new send (monotonic counter works well).
+   */
+  pendingMessage?: { id: number; text: string } | null;
+  lockedStudios?: string[];
 }) {
   const [open, setOpen] = useState(true);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -112,10 +121,27 @@ export function ScheduleAssistantSidebar({
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const canSend = schedule.length > 0 && !loading && !disabledReason;
+  const lockedStudioKeys = useMemo(() => studioLockKeysFromList(lockedStudios), [lockedStudios]);
+  // Keep a stable ref to `send` so the pending-message effect always calls the latest closure.
+  const sendRef = useRef<(() => Promise<void>) | undefined>(undefined);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, loading]);
+
+  // When a pending message arrives (e.g. from the "Explain changes" button), open the
+  // sidebar and auto-send it as a new user turn.
+  useEffect(() => {
+    if (!pendingMessage?.text) return;
+    setOpen(true);
+    setInput(pendingMessage.text);
+    // Defer send one tick so `input` state settles before `send` reads it.
+    const t = setTimeout(() => {
+      sendRef.current?.();
+    }, 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingMessage?.id]);
 
   const send = useCallback(async () => {
     const text = input.trim();
@@ -139,6 +165,9 @@ export function ScheduleAssistantSidebar({
         Object.keys(hitchkickPayload as object).length > 0
       ) {
         payload.hitchkickPayload = hitchkickPayload;
+      }
+      if (lockedStudios.length > 0) {
+        payload.lockedStudios = lockedStudios;
       }
       const res = await fetch("/api/schedule/assistant", {
         method: "POST",
@@ -165,7 +194,9 @@ export function ScheduleAssistantSidebar({
         appliedNote =
           "\n\n— Schedule not changed: that sounded like a question, not a request to swap or move routines. Say explicitly which routines to swap if you want edits.";
       } else if (ops.length > 0) {
-        const { next, applied, skipped } = applyScheduleAssistantOps(schedule, ops as ScheduleAssistantOp[]);
+        const { next, applied, skipped } = applyScheduleAssistantOps(schedule, ops as ScheduleAssistantOp[], {
+          lockedStudioKeys,
+        });
         onScheduleReplace(next);
         if (applied.length) {
           appliedNote = describeAppliedAssistantOps(applied, schedule, timeZone);
@@ -197,17 +228,22 @@ export function ScheduleAssistantSidebar({
     competitionName,
     hitchkickPayload,
     input,
+    lockedStudioKeys,
+    lockedStudios,
     messages,
     onScheduleReplace,
     schedule,
     timeZone,
   ]);
 
+  // Keep ref current so the pending-message effect always calls the latest `send` closure.
+  sendRef.current = send;
+
   return (
     <aside
       className={`shrink-0 border-zinc-200 bg-zinc-50/80 dark:border-zinc-800 dark:bg-zinc-950/50 lg:sticky lg:top-4 lg:self-start ${
         open
-          ? "flex h-[min(72dvh,620px)] w-full max-w-full flex-col border-t p-4 lg:mt-0 lg:h-[calc(100vh-2rem)] lg:w-[min(100vw-2rem,380px)] lg:max-w-[380px] lg:border-l lg:border-t-0"
+          ? "flex h-[min(72dvh,620px)] w-full max-w-full flex-col border-t p-4 lg:mt-0 lg:h-[calc(100vh-2rem)] lg:w-[min(100vw-2rem,320px)] lg:max-w-[320px] lg:border-l lg:border-t-0"
           : "w-12 border-l p-2"
       }`}
     >
@@ -242,8 +278,8 @@ export function ScheduleAssistantSidebar({
             <p className="text-xs text-zinc-600 dark:text-zinc-400">
               Ask about spacing, dancers by name, choreographers, same-studio overlaps, or say things like
               “swap routines 12 and 15 on Saturday.” Each request sends the schedule already loaded in your browser
-              to the assistant (no extra Hitchkick round-trip). Refresh the page to pull the latest event export. Edits
-              apply to this browser session only (not Hitchkick).
+              to the assistant (no extra Hitchkick round-trip). Refresh the page to pull the latest event export. Use{" "}
+              <strong>Publish schedule</strong> above the timeline to write changes to Hitchkick when configured.
             </p>
             {schedule.length === 0 ? (
               <p className="text-xs text-amber-800 dark:text-amber-200">Load a schedule with times to use the assistant.</p>

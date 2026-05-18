@@ -1,21 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
 import {
-  DndContext,
-  DragOverlay,
-  KeyboardSensor,
-  PointerSensor,
-  closestCenter,
-  useDraggable,
-  useDroppable,
-  useSensor,
-  useSensors,
-  type DragEndEvent,
-  type DragStartEvent,
-} from "@dnd-kit/core";
-import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
+  draggable,
+  dropTargetForElements,
+  monitorForElements,
+} from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
+import {
+  attachClosestEdge,
+  extractClosestEdge,
+} from "@atlaskit/pragmatic-drag-and-drop-hitbox/closest-edge";
 import {
   buildRowStartsFromAll,
   routinesByStageAndStart,
@@ -27,6 +22,7 @@ import type {
   ScheduleFindingSeverity,
 } from "@/lib/schedule/types";
 import { severityFriendlyLabel, shortTopicForCode } from "@/lib/schedule/types";
+import { divisionLabelWithAotySegment } from "@/lib/aotySegmentDisplay";
 import {
   indexFindingsByEntryId,
   type HighlightMode,
@@ -46,16 +42,6 @@ const STAGE_PALETTE = [
 
 function colorsForStage(stageNum: number) {
   return STAGE_PALETTE[(Math.max(1, stageNum) - 1) % STAGE_PALETTE.length];
-}
-
-function timelineClusterCaption(r: ScheduledRoutine): string | null {
-  const c = r.clusterIndex.trim();
-  if (!c) return null;
-  if (c === "_") {
-    if (!r.scheduleEntryId.startsWith("draft-")) return null;
-    return "Default block";
-  }
-  return `Cluster ${c}`;
 }
 
 function parseDayKeyToNoonUtc(dayKey: string): Date {
@@ -91,11 +77,21 @@ function formatStartClock(d: Date, timeZone: string): string {
 }
 
 function categoryTrail(r: ScheduledRoutine): string {
-  const parts = [r.levelName, r.categoryName, r.divisionName].map((s) => s.trim()).filter(Boolean);
+  const level = r.levelName.trim();
+  const cat = r.categoryName.trim();
+  const div = divisionLabelWithAotySegment(r.divisionName, r.aotySegment);
+  const parts = [level, cat, div].filter(Boolean);
   return parts.join(" ▸ ");
 }
 
+function shouldShowPerformerNamesOnTimeline(r: ScheduledRoutine): boolean {
+  if (/\bsolo\b/i.test(String(r.divisionName ?? "").trim())) return true;
+  const seg = String(r.aotySegment ?? "").trim().toLowerCase();
+  return seg.startsWith("aoty_");
+}
+
 function performerLine(r: ScheduledRoutine): string {
+  if (!shouldShowPerformerNamesOnTimeline(r)) return "";
   if (r.rosterDancerNames.length) return r.rosterDancerNames.slice(0, 2).join(", ");
   return "";
 }
@@ -119,20 +115,6 @@ function maxSeverityInList(
     else if (s === "info" && best !== "warning") best = "info";
   }
   return best;
-}
-
-function TimelineDragOverlayCard({ routine }: { routine: ScheduledRoutine }) {
-  const { num: numColor, studio: studioColor } = colorsForStage(routine.stageNum);
-  return (
-    <div className="max-w-[min(100vw-2rem,22rem)] cursor-grabbing rounded-md border border-zinc-200 bg-white px-3 py-2 shadow-xl shadow-zinc-900/25 dark:border-zinc-600 dark:bg-zinc-900 dark:shadow-black/50">
-      <RoutineCardBody
-        routine={routine}
-        align="left"
-        numColor={numColor}
-        studioColor={studioColor}
-      />
-    </div>
-  );
 }
 
 function GuidelineAlertGlyph({ severity }: { severity: ScheduleFindingSeverity }) {
@@ -173,7 +155,6 @@ function entryFindingsTooltip(findings: ScheduleFinding[]): string {
     .slice(0, 1800);
 }
 
-/** Native `title` tooltips are slow; show notes quickly on hover/focus. */
 const GUIDELINE_FLAG_TOOLTIP_DELAY_MS = 120;
 
 function FindingFlagTip({
@@ -191,10 +172,7 @@ function FindingFlagTip({
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const openInstant = useCallback(() => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
     setOpen(true);
   }, []);
 
@@ -204,19 +182,11 @@ function FindingFlagTip({
   }, []);
 
   const close = useCallback(() => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
     setOpen(false);
   }, []);
 
-  useEffect(
-    () => () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-    },
-    []
-  );
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
 
   return (
     <span className="relative inline-flex shrink-0">
@@ -260,7 +230,6 @@ function RoutineCardBody({
 }) {
   const trail = categoryTrail(routine);
   const perf = performerLine(routine);
-  const clusterLine = timelineClusterCaption(routine);
   const maxSev = entryFindings?.length ? maxSeverityFromFindings(entryFindings) : null;
   const studioLabel = routine.studioName || `Studio ${routine.studioCode}`;
   const tip = entryFindings?.length ? entryFindingsTooltip(entryFindings) : "";
@@ -274,7 +243,7 @@ function RoutineCardBody({
         #{routine.routineNumber}
       </div>
       <div
-        className={`text-[15px] font-semibold text-zinc-900 dark:text-zinc-50 ${
+        className={`break-words text-[15px] font-semibold text-zinc-900 dark:text-zinc-50 ${
           align === "right" ? "text-right" : "text-left"
         }`}
       >
@@ -289,23 +258,51 @@ function RoutineCardBody({
         }`}
       >
         {maxSev && entryFindings?.length && ariaLabel ? (
-          <FindingFlagTip
-            severity={maxSev}
-            tip={tip}
-            ariaLabel={ariaLabel}
-            align={align}
-          />
+          <FindingFlagTip severity={maxSev} tip={tip} ariaLabel={ariaLabel} align={align} />
         ) : null}
         <span className="min-w-0 truncate">{studioLabel}</span>
       </div>
-      {clusterLine ? (
-        <div className="text-[11px] text-zinc-500 dark:text-zinc-400">{clusterLine}</div>
-      ) : null}
       {trail ? (
         <div className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">{trail}</div>
       ) : null}
     </>
   );
+}
+
+const RoutineCardBodyMemo = memo(RoutineCardBody, (prev, next) => {
+  if (prev.align !== next.align) return false;
+  if (prev.numColor !== next.numColor) return false;
+  if (prev.studioColor !== next.studioColor) return false;
+  if (prev.entryFindings !== next.entryFindings) return false;
+  const a = prev.routine;
+  const b = next.routine;
+  if (a.scheduleEntryId !== b.scheduleEntryId) return false;
+  if (a.routineNumber !== b.routineNumber) return false;
+  if (a.routineTitle !== b.routineTitle) return false;
+  if (a.studioName !== b.studioName) return false;
+  if (a.studioCode !== b.studioCode) return false;
+  if (a.levelName !== b.levelName) return false;
+  if (a.categoryName !== b.categoryName) return false;
+  if (a.divisionName !== b.divisionName) return false;
+  if (a.aotySegment !== b.aotySegment) return false;
+  const an = a.rosterDancerNames;
+  const bn = b.rosterDancerNames;
+  if (an.length !== bn.length) return false;
+  for (let i = 0; i < an.length; i++) { if (an[i] !== bn[i]) return false; }
+  return true;
+});
+
+/**
+ * Drag data type — kept as a plain object so pragmatic-dnd can pass it through native DnD events.
+ */
+type RoutineDragData = {
+  type: "routine";
+  entryId: string;
+  stageNum: number;
+};
+
+function isRoutineDragData(d: Record<string, unknown>): d is RoutineDragData {
+  return d.type === "routine" && typeof d.entryId === "string" && typeof d.stageNum === "number";
 }
 
 function TimelineRoutineCard({
@@ -335,64 +332,79 @@ function TimelineRoutineCard({
   const cellOpacity = Math.min(findOp * studioFactor, 1);
   const entryFindings = findingsMap.get(routine.scheduleEntryId);
 
-  const {
-    attributes,
-    listeners,
-    setNodeRef: setDragRef,
-    setActivatorNodeRef,
-    isDragging,
-    transform,
-  } = useDraggable({
-    id: routine.scheduleEntryId,
-    disabled: !interactive,
-  });
+  const cardRef = useRef<HTMLDivElement>(null);
+  const handleRef = useRef<HTMLButtonElement>(null);
+  const topLineRef = useRef<HTMLDivElement>(null);
+  const bottomLineRef = useRef<HTMLDivElement>(null);
 
-  const { setNodeRef: setDropRef, isOver } = useDroppable({
-    id: routine.scheduleEntryId,
-    disabled: !interactive,
-  });
+  useEffect(() => {
+    const el = cardRef.current;
+    const handle = handleRef.current;
+    if (!el || !handle || !interactive) return;
 
-  const setBothRefs = useCallback(
-    (el: HTMLDivElement | null) => {
-      setDragRef(el);
-      setDropRef(el);
-    },
-    [setDragRef, setDropRef]
-  );
+    const data: RoutineDragData = {
+      type: "routine",
+      entryId: routine.scheduleEntryId,
+      stageNum: routine.stageNum,
+    };
 
-  /** Source node stays in layout but is hidden while dragging; pointer visual is `DragOverlay`. */
-  const hideWhileDragging = interactive && isDragging;
-  const dragTransform =
-    transform && !hideWhileDragging ? CSS.Translate.toString(transform) : undefined;
-  const dragStyle: CSSProperties = {
-    opacity: hideWhileDragging ? 0 : cellOpacity,
-    ...(dragTransform ? { transform: dragTransform } : {}),
-    ...(hideWhileDragging ? { pointerEvents: "none" as const } : {}),
-  };
+    const clearLines = () => {
+      if (topLineRef.current) topLineRef.current.style.opacity = "0";
+      if (bottomLineRef.current) bottomLineRef.current.style.opacity = "0";
+    };
+
+    return combine(
+      draggable({
+        element: el,
+        dragHandle: handle,
+        getInitialData: () => data,
+        onDragStart: () => el.setAttribute("data-dragging", ""),
+        onDrop: () => el.removeAttribute("data-dragging"),
+      }),
+      dropTargetForElements({
+        element: el,
+        canDrop: ({ source }) => {
+          const d = source.data;
+          return (
+            isRoutineDragData(d) &&
+            d.entryId !== routine.scheduleEntryId &&
+            d.stageNum === routine.stageNum
+          );
+        },
+        getData: ({ input }) =>
+          attachClosestEdge(data, { input, element: el, allowedEdges: ["top", "bottom"] }),
+        onDrag: ({ self }) => {
+          const edge = extractClosestEdge(self.data);
+          if (topLineRef.current) topLineRef.current.style.opacity = edge === "top" ? "1" : "0";
+          if (bottomLineRef.current) bottomLineRef.current.style.opacity = edge === "bottom" ? "1" : "0";
+        },
+        onDragLeave: clearLines,
+        onDrop: clearLines,
+      })
+    );
+  }, [routine.scheduleEntryId, routine.stageNum, interactive]);
 
   return (
     <div
-      ref={setBothRefs}
-      style={dragStyle}
-      className={`rounded-md transition-shadow duration-200 ease-out ${
-        isOver && interactive && !isDragging
-          ? "shadow-[0_0_0_2px_rgba(236,72,153,0.55)] ring-offset-2 ring-offset-white dark:ring-offset-zinc-950"
-          : ""
-      }`}
+      ref={cardRef}
+      style={{ opacity: cellOpacity }}
+      className="relative rounded-md [&[data-dragging]]:opacity-25 [&[data-dragging]]:cursor-grabbing"
     >
+      {/* Drop indicator — top edge */}
       <div
-        className={`flex gap-2 ${align === "right" ? "flex-row-reverse" : ""} ${
-          align === "right" ? "items-end" : ""
-        }`}
-      >
+        ref={topLineRef}
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 z-20 h-[3px] rounded-full bg-pink-500 opacity-0"
+        style={{ top: "-2px" }}
+      />
+
+      <div className={`flex gap-2 ${align === "right" ? "flex-row-reverse items-end" : ""}`}>
         {interactive ? (
           <button
+            ref={handleRef}
             type="button"
             className="mt-0.5 shrink-0 cursor-grab touch-none rounded border border-transparent px-1 text-zinc-400 hover:border-zinc-300 hover:bg-zinc-100 hover:text-zinc-600 active:cursor-grabbing dark:hover:border-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
-            ref={setActivatorNodeRef}
-            {...listeners}
-            {...attributes}
-            aria-label="Drag to move this routine before another on the same day (drops onto target routine)"
+            aria-label="Drag to reorder this routine within its stage"
           >
             ⋮⋮
           </button>
@@ -404,7 +416,7 @@ function TimelineRoutineCard({
             align === "right" ? "text-right" : "text-left"
           } ${selected ? "bg-zinc-200/70 dark:bg-zinc-700/50" : ""}`}
         >
-          <RoutineCardBody
+          <RoutineCardBodyMemo
             routine={routine}
             align={align}
             numColor={numColor}
@@ -413,6 +425,14 @@ function TimelineRoutineCard({
           />
         </button>
       </div>
+
+      {/* Drop indicator — bottom edge */}
+      <div
+        ref={bottomLineRef}
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 z-20 h-[3px] rounded-full bg-pink-500 opacity-0"
+        style={{ bottom: "-2px" }}
+      />
     </div>
   );
 }
@@ -443,7 +463,7 @@ function StageCell({
   if (routines.length === 0) {
     return (
       <td
-        className={`align-top border-b border-zinc-200/80 px-3 py-2 dark:border-zinc-700/80 ${
+        className={`min-w-0 align-top border-b border-zinc-200/80 px-2 py-2 sm:px-3 dark:border-zinc-700/80 ${
           borderRight ? "border-r border-zinc-200/80 dark:border-zinc-700/80" : ""
         }`}
       />
@@ -452,34 +472,30 @@ function StageCell({
 
   return (
     <td
-      className={`align-top border-b border-zinc-200/80 px-3 py-2 dark:border-zinc-700/80 ${
+      className={`min-w-0 align-top border-b border-zinc-200/80 px-2 py-2 sm:px-3 dark:border-zinc-700/80 ${
         interactive ? "overflow-visible" : ""
-      } ${
-        borderRight ? "border-r border-zinc-200/80 dark:border-zinc-700/80" : ""
-      } ${severityAccent(maxSeverityInList(routines, findingsMap))}`}
+      } ${borderRight ? "border-r border-zinc-200/80 dark:border-zinc-700/80" : ""} ${severityAccent(
+        maxSeverityInList(routines, findingsMap)
+      )}`}
     >
       <div className={align === "right" ? "flex flex-col items-end" : ""}>
-        {routines.map((r, i) => {
-          return (
-            <div
-              key={r.scheduleEntryId}
-              className={
-                i > 0 ? "mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-700" : ""
-              }
-            >
-              <TimelineRoutineCard
-                routine={r}
-                align={align}
-                findingsMap={findingsMap}
-                highlight={highlight}
-                selectedEntryId={selectedEntryId}
-                onSelect={onSelect}
-                emphasizeStudioName={emphasizeStudioName}
-                interactive={interactive}
-              />
-            </div>
-          );
-        })}
+        {routines.map((r, i) => (
+          <div
+            key={r.scheduleEntryId}
+            className={i > 0 ? "mt-3 border-t border-zinc-200 pt-3 dark:border-zinc-700" : ""}
+          >
+            <TimelineRoutineCard
+              routine={r}
+              align={align}
+              findingsMap={findingsMap}
+              highlight={highlight}
+              selectedEntryId={selectedEntryId}
+              onSelect={onSelect}
+              emphasizeStudioName={emphasizeStudioName}
+              interactive={interactive}
+            />
+          </div>
+        ))}
       </div>
     </td>
   );
@@ -492,60 +508,47 @@ export function TimelineSection({
   timeZone,
   emphasizeStudioName,
   interactive = false,
-  onReorderInsertBefore,
+  onDrop,
 }: {
   groups: TimelineGroupModel[];
   findings: ScheduleFinding[];
   highlight: HighlightMode;
   timeZone?: string;
   emphasizeStudioName?: string;
-  /** When set, drag handle (⋮⋮) moves the routine to immediately before the target in timeline read order (same calendar day). */
+  /** When set the timeline is interactive (drag handles shown). */
   interactive?: boolean;
-  onReorderInsertBefore?: (activeEntryId: string, beforeEntryId: string) => void;
+  /**
+   * Called once when a drag completes with a valid same-stage drop.
+   * `edge` is the closest edge at the moment of drop — "top" = insert before target, "bottom" = insert after.
+   */
+  onDrop?: (sourceId: string, targetId: string, edge: "top" | "bottom") => void;
 }) {
   const findingsMap = useMemo(() => indexFindingsByEntryId(findings), [findings]);
-  const routineByEntryId = useMemo(() => {
-    const m = new Map<string, ScheduledRoutine>();
-    for (const g of groups) {
-      for (const r of g.routines) m.set(r.scheduleEntryId, r);
-    }
-    return m;
-  }, [groups]);
   const tz = timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
-  const [activeEntryId, setActiveEntryId] = useState<string | null>(null);
-  const reorderEnabledRef = useRef(false);
-  reorderEnabledRef.current = !!(interactive && onReorderInsertBefore);
 
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
-  );
+  /** Wire global drop monitor — runs at most once per drop, no per-frame overhead. */
+  useEffect(() => {
+    if (!interactive || !onDrop) return;
+    return monitorForElements({
+      canMonitor: ({ source }) => isRoutineDragData(source.data),
+      onDrop: ({ source, location }) => {
+        const target = location.current.dropTargets[0];
+        if (!target) return;
+        const sd = source.data;
+        const td = target.data;
+        if (!isRoutineDragData(sd) || !isRoutineDragData(td)) return;
+        if (sd.entryId === td.entryId) return;
+        if (sd.stageNum !== td.stageNum) return;
+        const edge = extractClosestEdge(td);
+        if (edge !== "top" && edge !== "bottom") return;
+        onDrop(sd.entryId, td.entryId, edge);
+      },
+    });
+  }, [interactive, onDrop]);
 
-  const handleDragStart = useCallback((e: DragStartEvent) => {
-    if (!reorderEnabledRef.current) return;
-    setActiveEntryId(String(e.active.id));
-  }, []);
-
-  const handleDragEnd = useCallback(
-    (e: DragEndEvent) => {
-      if (reorderEnabledRef.current && onReorderInsertBefore) {
-        const { active, over } = e;
-        if (over && active.id !== over.id) {
-          onReorderInsertBefore(String(active.id), String(over.id));
-        }
-      }
-      setActiveEntryId(null);
-    },
-    [onReorderInsertBefore]
-  );
-
-  const handleDragCancel = useCallback(() => {
-    setActiveEntryId(null);
-  }, []);
-
-  const timelineBody = (
-    <div className="space-y-10">
+  return (
+    <div className="min-w-0 space-y-10">
       {groups.map((g) => {
         const stages = [...new Set(g.routines.map((r) => r.stageNum))].sort((a, b) => a - b);
         const byStageStart = routinesByStageAndStart(g.routines);
@@ -555,7 +558,7 @@ export function TimelineSection({
         return (
           <section
             key={g.dayKey}
-            className="rounded-xl border border-zinc-300 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-950"
+            className="min-w-0 rounded-xl border border-zinc-300 bg-white shadow-sm dark:border-zinc-700 dark:bg-zinc-950"
           >
             <div className="bg-zinc-900 px-4 py-3 text-center">
               <div className="text-xs font-semibold tracking-[0.2em] text-violet-300/90">
@@ -566,31 +569,45 @@ export function TimelineSection({
               </div>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[720px] border-collapse text-sm">
+            <div className="min-w-0 overflow-x-auto">
+              <table className="w-full min-w-0 table-fixed border-collapse text-sm">
+                {classicTwo ? (
+                  <colgroup>
+                    <col />
+                    <col className="w-[5.5rem]" />
+                    <col />
+                  </colgroup>
+                ) : (
+                  <colgroup>
+                    <col className="w-[4.5rem]" />
+                    {stages.map((sn) => (
+                      <col key={sn} />
+                    ))}
+                  </colgroup>
+                )}
                 <thead>
                   <tr className="border-b-2 border-zinc-300 bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-900/80">
                     {classicTwo ? (
                       <>
-                        <th className="w-[40%] border-r border-zinc-200 px-3 py-2 text-left text-xs font-semibold tracking-widest text-violet-500 dark:border-zinc-700 dark:text-violet-400">
+                        <th className="min-w-0 border-r border-zinc-200 px-2 py-2 text-left text-[10px] font-semibold tracking-wider text-violet-500 sm:px-3 sm:text-xs sm:tracking-widest dark:border-zinc-700 dark:text-violet-400">
                           STAGE 1
                         </th>
-                        <th className="w-[5.5rem] whitespace-nowrap border-r border-zinc-200 px-2 py-2 text-center text-xs font-semibold tracking-widest text-violet-500 dark:border-zinc-700 dark:text-violet-400">
+                        <th className="w-[5.5rem] min-w-0 whitespace-nowrap border-r border-zinc-200 px-1 py-2 text-center text-[10px] font-semibold tracking-wider text-violet-500 sm:px-2 sm:text-xs sm:tracking-widest dark:border-zinc-700 dark:text-violet-400">
                           TIME
                         </th>
-                        <th className="w-[40%] px-3 py-2 text-right text-xs font-semibold tracking-widest text-violet-500 dark:text-violet-400">
+                        <th className="min-w-0 px-2 py-2 text-right text-[10px] font-semibold tracking-wider text-violet-500 sm:px-3 sm:text-xs sm:tracking-widest dark:text-violet-400">
                           STAGE 2
                         </th>
                       </>
                     ) : (
                       <>
-                        <th className="w-[5.5rem] whitespace-nowrap border-r border-zinc-200 px-2 py-2 text-center text-xs font-semibold tracking-widest text-violet-500 dark:border-zinc-700 dark:text-violet-400">
+                        <th className="min-w-0 whitespace-nowrap border-r border-zinc-200 px-1 py-2 text-center text-[10px] font-semibold tracking-wider text-violet-500 sm:px-2 sm:text-xs sm:tracking-widest dark:border-zinc-700 dark:text-violet-400">
                           TIME
                         </th>
                         {stages.map((sn, idx) => (
                           <th
                             key={sn}
-                            className={`min-w-[12rem] px-3 py-2 text-left text-xs font-semibold tracking-widest text-violet-500 dark:text-violet-400 ${
+                            className={`min-w-0 break-words px-2 py-2 text-left text-[10px] font-semibold tracking-wider text-violet-500 sm:px-3 sm:text-xs sm:tracking-widest dark:text-violet-400 ${
                               idx < stages.length - 1
                                 ? "border-r border-zinc-200 dark:border-zinc-700"
                                 : ""
@@ -636,7 +653,7 @@ export function TimelineSection({
                               emphasizeStudioName={emphasizeStudioName}
                               interactive={!!interactive}
                             />
-                            <td className="border-r border-zinc-200/80 px-2 py-2 text-center font-mono text-xs tabular-nums text-zinc-600 dark:border-zinc-700/80 dark:text-zinc-400">
+                            <td className="min-w-0 border-r border-zinc-200/80 px-1 py-2 text-center font-mono text-[10px] tabular-nums leading-tight text-zinc-600 dark:border-zinc-700/80 dark:text-zinc-400 sm:px-2 sm:text-xs">
                               {formatStartClock(rowDate, tz)}
                             </td>
                             <StageCell
@@ -657,7 +674,7 @@ export function TimelineSection({
 
                       return (
                         <tr key={t} className={zebra}>
-                          <td className="border-r border-zinc-200/80 px-2 py-2 text-center font-mono text-xs tabular-nums text-zinc-600 dark:border-zinc-700/80 dark:text-zinc-400">
+                          <td className="min-w-0 border-r border-zinc-200/80 px-1 py-2 text-center font-mono text-[10px] tabular-nums leading-tight text-zinc-600 dark:border-zinc-700/80 dark:text-zinc-400 sm:px-2 sm:text-xs">
                             {formatStartClock(rowDate, tz)}
                           </td>
                           {stages.map((sn, sidx) => {
@@ -690,27 +707,5 @@ export function TimelineSection({
       })}
     </div>
   );
-
-  const dragShell = (
-    <DndContext
-      sensors={sensors}
-      collisionDetection={closestCenter}
-      onDragStart={handleDragStart}
-      onDragEnd={handleDragEnd}
-      onDragCancel={handleDragCancel}
-    >
-      {timelineBody}
-      <DragOverlay dropAnimation={null}>
-        {activeEntryId && routineByEntryId.get(activeEntryId) ? (
-          <TimelineDragOverlayCard routine={routineByEntryId.get(activeEntryId)!} />
-        ) : null}
-      </DragOverlay>
-    </DndContext>
-  );
-
-  if (!interactive || !onReorderInsertBefore) {
-    return timelineBody;
-  }
-
-  return dragShell;
 }
+

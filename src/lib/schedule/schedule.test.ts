@@ -50,6 +50,7 @@ describe("cluster planning", () => {
     routineNumber: "1",
     routineTitle: "T",
     choreographer: "",
+    aotySegment: "",
     categoryName: "Jazz",
     divisionName: "Solo",
     levelName: "Teen",
@@ -90,6 +91,7 @@ describe("cluster planning", () => {
       routineNumber: "1",
       routineTitle: "A day in Paris",
       choreographer: "",
+      aotySegment: "",
       categoryName: "Jazz",
       divisionName: "Solo",
       levelName: "Teen",
@@ -153,6 +155,44 @@ describe("parseRoutinesFromEntries choreographer", () => {
     } as HitchkickScheduleEntry;
     const [r] = parseRoutinesFromEntries([entry]);
     expect(r?.choreographer).toBe("Kelly Sweeney");
+  });
+});
+
+describe("parseRoutinesFromEntries aotySegment", () => {
+  it("reads finals and aoty_* from parentRoutine", () => {
+    const finals = {
+      type: "routine",
+      id: "e1",
+      number: "1",
+      routineIndex: "0",
+      startTime: "2025-06-01T14:00:00.000Z",
+      endTime: "2025-06-01T14:03:00.000Z",
+      stage: { name: "A", stageNum: 1 },
+      cluster: { clusterIndex: "0" },
+      parentRoutine: {
+        id: "r1",
+        title: "Solo A",
+        aotySegment: "finals",
+        registrations: { studios: { businessName: "S" } },
+        level: { name: "Teen" },
+        category: { name: "Jazz" },
+        division: { name: "Solo" },
+        submissionRoutines: [],
+      },
+    } as HitchkickScheduleEntry;
+    const aoty = {
+      ...finals,
+      id: "e2",
+      parentRoutine: {
+        ...(finals.parentRoutine as object),
+        id: "r2",
+        title: "Solo B",
+        aotySegment: "aoty_female",
+      },
+    } as HitchkickScheduleEntry;
+    const rows = parseRoutinesFromEntries([finals, aoty]);
+    expect(rows.find((x) => x.routineId === "r1")?.aotySegment).toBe("finals");
+    expect(rows.find((x) => x.routineId === "r2")?.aotySegment).toBe("aoty_female");
   });
 });
 
@@ -248,7 +288,7 @@ describe("analysis", () => {
     expect(overlap[0].severity).toBe("error");
   });
 
-  it("flags duplicate event routine numbers across stages", () => {
+  it("allows the same performance number on different stages the same day", () => {
     const base = {
       type: "routine",
       id: "e1",
@@ -286,6 +326,36 @@ describe("analysis", () => {
     const routines = parseRoutinesFromEntries(entries);
     const { findings } = analyzeSchedule(routines, entries);
     const dup = findings.filter((f) => f.code === "duplicate_routine_number");
+    expect(dup.length).toBe(0);
+  });
+
+  it("flags duplicate performance numbers on the same stage and day", () => {
+    const mk = (id: string, rid: string, start: string) => ({
+      type: "routine" as const,
+      id,
+      number: "5",
+      routineIndex: "5",
+      startTime: start,
+      endTime: "2025-06-01T14:03:00.000Z",
+      stage: { name: "A", stageNum: 1 },
+      cluster: { clusterIndex: "1" },
+      parentRoutine: {
+        id: rid,
+        title: `Act ${rid}`,
+        registrations: { studios: { businessName: "Studio X" } },
+        level: { name: "Teen" },
+        category: { name: "Jazz" },
+        division: { name: "Solo" },
+        submissionRoutines: [],
+      },
+    });
+    const entries = [
+      mk("e1", "r1", "2025-06-01T14:00:00.000Z"),
+      mk("e2", "r2", "2025-06-01T15:00:00.000Z"),
+    ] as HitchkickScheduleEntry[];
+    const routines = parseRoutinesFromEntries(entries);
+    const { findings } = analyzeSchedule(routines, entries);
+    const dup = findings.filter((f) => f.code === "duplicate_routine_number");
     expect(dup.length).toBe(1);
     expect(dup[0].severity).toBe("error");
   });
@@ -319,7 +389,7 @@ describe("analysis", () => {
     });
     const entries = [
       mk("e1", "05", "2025-06-01T16:00:00.000Z", "2025-06-01T16:03:00.000Z", 1, "r1"),
-      mk("e2", "5", "2025-06-01T17:00:00.000Z", "2025-06-01T17:03:00.000Z", 2, "r2"),
+      mk("e2", "5", "2025-06-01T17:00:00.000Z", "2025-06-01T17:03:00.000Z", 1, "r2"),
     ] as HitchkickScheduleEntry[];
     const routines = parseRoutinesFromEntries(entries);
     const { findings } = analyzeSchedule(routines, entries);
@@ -343,6 +413,7 @@ describe("draft export", () => {
         routineNumber: "1",
         routineTitle: "One",
         choreographer: "",
+        aotySegment: "",
         categoryName: "Jazz",
         divisionName: "Solo",
         levelName: "Teen",
@@ -362,6 +433,7 @@ describe("draft export", () => {
         routineNumber: "2",
         routineTitle: "Two",
         choreographer: "",
+        aotySegment: "",
         categoryName: "Jazz",
         divisionName: "Solo",
         levelName: "Teen",
@@ -893,7 +965,7 @@ describe("routine breakdown", () => {
     over: Partial<ScheduledRoutine> & Pick<ScheduledRoutine, "scheduleEntryId">
   ): ScheduledRoutine => {
     const { scheduleEntryId, ...rest } = over;
-    return {
+    const row: ScheduledRoutine = {
       scheduleEntryId,
       routineId: `rid-${scheduleEntryId}`,
       studioName: "S",
@@ -906,12 +978,17 @@ describe("routine breakdown", () => {
       routineNumber: "1",
       routineTitle: "T",
       choreographer: "",
+      aotySegment: "",
       categoryName: "Jazz",
       divisionName: "Solo",
       levelName: "Teen",
       rosterDancerNames: [],
       rosterDancerIds: [],
       ...rest,
+    };
+    return {
+      ...row,
+      aotySegment: row.aotySegment ?? "",
     };
   };
 

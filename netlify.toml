@@ -1,5 +1,10 @@
-# Next.js on Netlify (OpenNext adapter is applied automatically on build).
+# Next.js on Netlify — OpenNext adapter runs automatically on build (no [[plugins]] needed for Next 13.5+).
 # https://docs.netlify.com/build/frameworks/framework-setup-guides/nextjs/overview/
+#
+# Deploy: push to Git → Netlify “Add new site” → import repo (build cmd & Node are picked up from here),
+#   or CLI: `npx netlify login` then `npm run deploy:netlify` (production).
+# Set server-only env in Netlify: Site settings → Environment variables (see .env.example).
+#   HITCHKICK_PROXY_BASE (+ optional HITCHKICK_DIRECT_BASE / HITCHKICK_API_KEY, OPENAI_*, HITCHKICK_PUBLISH_PROXY_BASE).
 
 [build]
   command = "npm run build"

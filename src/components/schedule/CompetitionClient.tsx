@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { HitchkickScheduleResponse } from "@/lib/hitchkick/types";
 import { COMPETITIONS } from "@/lib/competitions";
@@ -29,19 +29,18 @@ import { RoutineDataReviewPanel } from "@/components/schedule/RoutineDataReviewP
 import { EventEntryGate } from "@/components/schedule/EventEntryGate";
 import { ImportedScheduleView } from "@/components/schedule/ImportedScheduleView";
 import { ScheduleAssistantSidebar } from "@/components/schedule/ScheduleAssistantSidebar";
+import { ScheduleSessionToolbar } from "@/components/schedule/ScheduleSessionToolbar";
+import { cloneScheduledRoutines } from "@/lib/schedule/scheduleSessionCore";
+import { useScheduleSession } from "@/lib/schedule/useScheduleSession";
 
-function cloneScheduledRoutines(rows: ScheduledRoutine[]): ScheduledRoutine[] {
-  return rows.map((r) => ({
-    ...r,
-    start: new Date(r.start),
-    end: new Date(r.end),
-  }));
+function serializeScheduleForApi(rows: ScheduledRoutine[]) {
+  return rows.map((r) => ({ ...r, start: r.start.toISOString(), end: r.end.toISOString() }));
 }
 
 export function CompetitionClient({ competitionId }: { competitionId: number }) {
-  const compName =
-    COMPETITIONS.find((c) => c.id === competitionId)?.name ?? `Competition ${competitionId}`;
-  const eventTimeZone = COMPETITIONS.find((c) => c.id === competitionId)?.timeZone;
+  const competitionEntry = COMPETITIONS.find((c) => c.id === competitionId);
+  const compName = competitionEntry?.name ?? `Competition ${competitionId}`;
+  const eventTimeZone = competitionEntry?.timeZone;
   const displayTimeZone =
     eventTimeZone ??
     (typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC");
@@ -61,8 +60,27 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
 
   const [entryMode, setEntryMode] = useState<EventEntryMode | "unset">("unset");
   const [entryHydrated, setEntryHydrated] = useState(false);
-  const [importEdited, setImportEdited] = useState<ScheduledRoutine[]>([]);
 
+  const scheduleSessionActive = phase === "ok" && entryMode === "import";
+  const scheduleSession = useScheduleSession({
+    competitionId,
+    active: scheduleSessionActive,
+  });
+
+  /** Incremented each time the optimizer asks the AI to explain changes. */
+  const pendingMsgIdRef = useRef(0);
+  const [assistantPendingMessage, setAssistantPendingMessage] = useState<{
+    id: number;
+    text: string;
+  } | null>(null);
+
+  const handleExplainChanges = useCallback((prompt: string) => {
+    setAssistantPendingMessage({ id: ++pendingMsgIdRef.current, text: prompt });
+  }, []);
+
+  const sessionReady = scheduleSession.baseline.length > 0;
+  const displayBaseline = sessionReady ? scheduleSession.baseline : scheduled;
+  const displayDraft = sessionReady ? scheduleSession.draft : scheduled;
   const scheduleServerSig = useMemo(
     () =>
       scheduled
@@ -74,18 +92,11 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
     [scheduled]
   );
 
-  useEffect(() => {
-    setImportEdited([]);
-    setHitchkickPayload(null);
-  }, [competitionId]);
-
-  useEffect(() => {
-    if (phase !== "ok" || scheduled.length === 0) {
-      setImportEdited([]);
-      return;
+  useLayoutEffect(() => {
+    if (phase === "ok" && entryMode === "import" && scheduled.length > 0) {
+      scheduleSession.rebaseline(scheduled, hitchkickPayload);
     }
-    setImportEdited(cloneScheduledRoutines(scheduled));
-  }, [competitionId, phase, scheduleServerSig]);
+  }, [phase, entryMode, scheduleServerSig, scheduled, hitchkickPayload, scheduleSession.rebaseline]);
 
   const routineBreakdownRows = useMemo(() => buildRoutineBreakdownFromScheduled(scheduled), [scheduled]);
   const routineRowsInExport = useMemo(
@@ -120,7 +131,7 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
         const schedEntries = extractScheduleEntries(data);
         const routines = parseRoutinesFromEntries(schedEntries);
         const tz =
-          COMPETITIONS.find((c) => c.id === competitionId)?.timeZone ??
+          competitionEntry?.timeZone ??
           Intl.DateTimeFormat().resolvedOptions().timeZone;
         const scheduledOnly = buildScheduledRoutines(routines, schedEntries, tz);
         if (!cancelled) {
@@ -247,19 +258,110 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
   }, [competitionId]);
 
   const assistantSchedule =
-    entryMode === "import" && importEdited.length > 0 ? importEdited : scheduled;
+    entryMode === "import" && displayDraft.length > 0 ? displayDraft : scheduled;
 
   const handleAssistantScheduleReplace = useCallback(
     (next: ScheduledRoutine[]) => {
       const copy = cloneScheduledRoutines(next);
       if (entryMode === "import") {
-        setImportEdited(copy);
+        scheduleSession.replaceDraft(copy);
       } else {
         setScheduled(copy);
       }
     },
-    [entryMode]
+    [entryMode, scheduleSession.replaceDraft]
   );
+
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [dryRunNote, setDryRunNote] = useState<string | null>(null);
+  const [scheduleUiResetKey, setScheduleUiResetKey] = useState(0);
+
+  const handleRevertToBaseline = useCallback(() => {
+    scheduleSession.resetDraftToBaseline();
+    setScheduleUiResetKey((k) => k + 1);
+  }, [scheduleSession.resetDraftToBaseline]);
+
+  const handlePublishSchedule = useCallback(async () => {
+    if (!sessionReady || !scheduleSession.baselineRevision) return;
+    scheduleSession.clearPublishError();
+    setIsPublishing(true);
+    setDryRunNote(null);
+    try {
+      const res = await fetch("/api/schedule/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          competitionId,
+          schedule: serializeScheduleForApi(scheduleSession.draft),
+          timeZone: displayTimeZone,
+          baselineRevision: scheduleSession.baselineRevision,
+          hitchkickPayload,
+        }),
+      });
+      const data = (await res.json()) as HitchkickScheduleResponse & {
+        error?: string;
+        conflict?: boolean;
+        freshPayload?: HitchkickScheduleResponse;
+        dryRun?: boolean;
+        message?: string;
+        hint?: string;
+      };
+
+      if (res.status === 409 && data.freshPayload) {
+        const fresh = data.freshPayload;
+        const schedEntries = extractScheduleEntries(fresh);
+        const routines = parseRoutinesFromEntries(schedEntries);
+        const tz =
+          competitionEntry?.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const scheduledOnly = buildScheduledRoutines(routines, schedEntries, tz);
+        setEntries(schedEntries);
+        setScheduled(scheduledOnly);
+        setHitchkickPayload(fresh.payload !== undefined ? fresh.payload : fresh);
+        scheduleSession.rebaseline(scheduledOnly, fresh.payload ?? fresh);
+        scheduleSession.reportPublishError(
+          data.error ?? "Server schedule changed — state refreshed from Hitchkick."
+        );
+        return;
+      }
+
+      if (!res.ok) {
+        scheduleSession.reportPublishError(
+          [data.error, data.hint].filter(Boolean).join("\n\n") || `HTTP ${res.status}`
+        );
+        return;
+      }
+
+      if (data.dryRun === true) {
+        setDryRunNote(
+          data.message ??
+            "Dry run: validated and merged locally — set HITCHKICK_PUBLISH_PROXY_BASE to write to Hitchkick."
+        );
+        return;
+      }
+
+      const schedEntries = extractScheduleEntries(data);
+      const routines = parseRoutinesFromEntries(schedEntries);
+      const tz =
+        competitionEntry?.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const scheduledOnly = buildScheduledRoutines(routines, schedEntries, tz);
+      setEntries(schedEntries);
+      setScheduled(scheduledOnly);
+      setHitchkickPayload(data.payload !== undefined ? data.payload : data);
+      scheduleSession.applyPublishSuccess(scheduledOnly, data.payload ?? data);
+      setDryRunNote(null);
+    } catch (e) {
+      scheduleSession.reportPublishError(e instanceof Error ? e.message : "Publish failed");
+    } finally {
+      setIsPublishing(false);
+    }
+  }, [
+    sessionReady,
+    scheduleSession,
+    competitionId,
+    displayTimeZone,
+    hitchkickPayload,
+    competitionEntry?.timeZone,
+  ]);
 
   const showEntryGate = phase === "ok" && entryHydrated && entryMode === "unset";
   const showImportView = phase === "ok" && entryHydrated && entryMode === "import";
@@ -340,15 +442,40 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
         {showImportView &&
           (scheduled.length === 0 ? (
             <ImportedScheduleView scheduled={scheduled} displayTimeZone={displayTimeZone} />
-          ) : importEdited.length > 0 ? (
-            <ImportedScheduleView
-              scheduled={scheduled}
-              displayTimeZone={displayTimeZone}
-              editedScheduled={importEdited}
-              onEditedScheduledChange={setImportEdited}
-            />
           ) : (
-            <p className="text-sm text-zinc-600 dark:text-zinc-400">Preparing schedule…</p>
+            <ImportedScheduleView
+              scheduled={displayBaseline}
+              displayTimeZone={displayTimeZone}
+              editedScheduled={displayDraft}
+              onEditedScheduledChange={(action, opts) =>
+                scheduleSession.replaceDraft(action, opts)
+              }
+              onExplainChanges={handleExplainChanges}
+              lockedStudios={scheduleSession.lockedStudios}
+              onLockedStudiosChange={(next) => scheduleSession.setLockedStudios(next)}
+              interactionLocked={!!scheduleSession.restoreOffer}
+              scheduleUiResetKey={scheduleUiResetKey}
+              sessionToolbar={
+                <ScheduleSessionToolbar
+                  canUndo={scheduleSession.canUndo}
+                  canRedo={scheduleSession.canRedo}
+                  onUndo={scheduleSession.undo}
+                  onRedo={scheduleSession.redo}
+                  isDirtyVsBaseline={scheduleSession.isDirtyVsBaseline}
+                  onRevertToBaseline={handleRevertToBaseline}
+                  restoreOffer={scheduleSession.restoreOffer}
+                  onRestore={scheduleSession.applyRestore}
+                  onDiscardRestore={scheduleSession.discardRestoreOffer}
+                  onSaveDraft={scheduleSession.flushDraftToStorage}
+                  onPublish={handlePublishSchedule}
+                  isPublishing={isPublishing}
+                  publishError={scheduleSession.publishError}
+                  onDismissPublishError={scheduleSession.clearPublishError}
+                  lastPublishedAt={scheduleSession.lastPublishedAt}
+                  dryRunNote={dryRunNote}
+                />
+              }
+            />
           ))}
 
         {showNewFlow && (
@@ -387,6 +514,8 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
           timeZone={displayTimeZone}
           schedule={assistantSchedule}
           onScheduleReplace={handleAssistantScheduleReplace}
+          pendingMessage={assistantPendingMessage}
+          lockedStudios={entryMode === "import" ? scheduleSession.lockedStudios : []}
         />
       ) : null}
     </div>

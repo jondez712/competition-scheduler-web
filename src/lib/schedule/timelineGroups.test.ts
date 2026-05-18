@@ -18,6 +18,7 @@ function row(partial: Partial<ScheduledRoutine> & Pick<ScheduledRoutine, "routin
     routineNumber: partial.routineNumber ?? "1",
     routineTitle: partial.routineTitle ?? partial.routineId,
     choreographer: partial.choreographer ?? "",
+    aotySegment: partial.aotySegment ?? "",
     categoryName: "",
     divisionName: "",
     levelName: "",

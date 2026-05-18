@@ -20,6 +20,7 @@ import type {
   ScheduleFindingSeverity,
 } from "./types";
 import { defaultAnalysisConfig } from "./types";
+import { divisionLabelWithAotySegment } from "@/lib/aotySegmentDisplay";
 
 function calendarDayKeyReadable(dayKey: string, eventTimeZone?: string): string {
   return eventTimeZone?.trim()
@@ -161,6 +162,7 @@ export function buildScheduledRoutines(
       routineNumber: r.routineNumber,
       routineTitle: r.routineTitle,
       choreographer: r.choreographer,
+      aotySegment: r.aotySegment,
       categoryName: r.categoryName,
       divisionName: r.divisionName,
       levelName: r.levelName,
@@ -190,6 +192,10 @@ function routineDetailLines(r: ScheduledRoutine, eventTimeZone?: string): string
   if (ch) {
     lines += `\n    Choreographer (credited): ${ch}`;
   }
+  if (String(r.aotySegment ?? "").trim()) {
+    const track = divisionLabelWithAotySegment(r.divisionName, r.aotySegment);
+    lines += `\n    Solo track: ${track}`;
+  }
   if (r.rosterDancerNames.length) {
     lines += `\n    Dancers listed on this entry: ${r.rosterDancerNames.join(", ")}`;
   }
@@ -197,8 +203,9 @@ function routineDetailLines(r: ScheduledRoutine, eventTimeZone?: string): string
 }
 
 /**
- * Hitchkick performance numbers should be unique event-wide. Digits-only values normalize
- * so "05" and "5" are treated as the same label.
+ * Performance numbers should be unique within a single stage line for a calendar day. Digits-only
+ * values normalize so "05" and "5" are treated as the same label. Different stages may reuse the
+ * same display number (each column is numbered 1…n independently).
  */
 function eventRoutineNumberKey(raw: string): string | null {
   const t = raw.trim();
@@ -216,14 +223,16 @@ function duplicateRoutineNumberFindings(
   for (const r of scheduled) {
     const k = eventRoutineNumberKey(r.routineNumber);
     if (k == null) continue;
-    const arr = byKey.get(k) ?? [];
+    const bucket = `${r.calendarDayKey}|${r.stageNum}|${k}`;
+    const arr = byKey.get(bucket) ?? [];
     arr.push(r);
-    byKey.set(k, arr);
+    byKey.set(bucket, arr);
   }
-  for (const [key, items] of byKey) {
+  for (const [, items] of byKey) {
     const unique = [...new Map(items.map((x) => [x.scheduleEntryId, x])).values()];
     if (unique.length < 2) continue;
     const ids = unique.map((x) => x.scheduleEntryId);
+    const key = eventRoutineNumberKey(unique[0]!.routineNumber) ?? "";
     const detailLines = unique
       .slice()
       .sort((a, b) => a.start.getTime() - b.start.getTime())
@@ -234,7 +243,7 @@ function duplicateRoutineNumberFindings(
       id: newId(),
       code: "duplicate_routine_number",
       severity: "error",
-      message: `Performance number ${label} is assigned to more than one scheduled routine. Numbers must be unique for the whole competition (not per stage).
+      message: `Performance number ${label} is assigned to more than one routine on the same stage and calendar day.
 
 ${detailLines}`,
       scheduleEntryIds: ids,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { applyScheduleAssistantOps } from "@/lib/schedule/scheduleAssistantOps";
+import { studioLockKeysFromList } from "@/lib/schedule/studioLock";
 import type { ScheduledRoutine } from "@/lib/schedule/types";
 
 function row(partial: Partial<ScheduledRoutine> & Pick<ScheduledRoutine, "scheduleEntryId">): ScheduledRoutine {
@@ -18,6 +19,7 @@ function row(partial: Partial<ScheduledRoutine> & Pick<ScheduledRoutine, "schedu
     routineNumber: partial.routineNumber ?? "1",
     routineTitle: partial.routineTitle ?? "Title",
     choreographer: partial.choreographer ?? "",
+    aotySegment: partial.aotySegment ?? "",
     categoryName: partial.categoryName ?? "Jazz",
     divisionName: partial.divisionName ?? "Junior",
     levelName: partial.levelName ?? "Level 1",
@@ -74,5 +76,66 @@ describe("applyScheduleAssistantOps", () => {
     ]);
     expect(skipped).toHaveLength(0);
     expect(next.find((r) => r.scheduleEntryId === "ea")!.stageNum).toBe(2);
+  });
+
+  it("skips swap when either studio is locked", () => {
+    const a = row({
+      scheduleEntryId: "ea",
+      studioName: "Alpha",
+      routineNumber: "10",
+      stageNum: 1,
+      start: new Date("2026-03-01T18:00:00Z"),
+      end: new Date("2026-03-01T18:03:00Z"),
+    });
+    const b = row({
+      scheduleEntryId: "eb",
+      studioName: "Beta",
+      routineNumber: "20",
+      stageNum: 2,
+      start: new Date("2026-03-01T18:00:00Z"),
+      end: new Date("2026-03-01T18:05:00Z"),
+    });
+    const locked = studioLockKeysFromList(["Alpha"]);
+    const { next, applied, skipped } = applyScheduleAssistantOps(
+      [a, b],
+      [{ op: "swap_by_entry_id", entryIdA: "ea", entryIdB: "eb" }],
+      { lockedStudioKeys: locked }
+    );
+    expect(applied).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0].reason).toMatch(/locked/i);
+    expect(next.find((r) => r.scheduleEntryId === "ea")!.stageNum).toBe(1);
+  });
+
+  it("skips swap_by_routine_numbers when matched row is locked", () => {
+    const a = row({
+      scheduleEntryId: "ea",
+      routineNumber: "12",
+      studioName: "LockUs",
+      calendarDayKey: "2026-03-01",
+      stageNum: 1,
+    });
+    const b = row({
+      scheduleEntryId: "eb",
+      routineNumber: "15",
+      studioName: "Open",
+      calendarDayKey: "2026-03-01",
+      stageNum: 2,
+    });
+    const locked = studioLockKeysFromList(["LockUs"]);
+    const { next, skipped } = applyScheduleAssistantOps(
+      [a, b],
+      [
+        {
+          op: "swap_by_routine_numbers",
+          dayKey: "2026-03-01",
+          routineNumberA: "12",
+          routineNumberB: "15",
+        },
+      ],
+      { lockedStudioKeys: locked }
+    );
+    expect(skipped).toHaveLength(1);
+    expect(next.find((r) => r.scheduleEntryId === "ea")!.stageNum).toBe(1);
   });
 });
