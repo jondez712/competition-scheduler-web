@@ -401,7 +401,13 @@ export function ScheduleAssistantSidebar({
                   rows={2}
                   disabled={!canSend}
                   placeholder={
-                    canSend ? "Message… (⌘/Ctrl+Enter to send)" : "Assistant unavailable for this state"
+                    loading
+                      ? "Working on it…"
+                      : disabledReason
+                        ? "Waiting…"
+                        : schedule.length === 0
+                          ? "Load a schedule to chat"
+                          : "Message… (⌘/Ctrl+Enter to send)"
                   }
                   className="w-full resize-none rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm text-zinc-900 shadow-sm placeholder:text-zinc-400 focus:border-pink-500 focus:outline-none focus:ring-1 focus:ring-pink-500 disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-950 dark:text-zinc-100"
                 />
