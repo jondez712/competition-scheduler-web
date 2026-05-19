@@ -1,4 +1,4 @@
-import type { BenchmarkCase, BenchmarkRawResult } from "@/lib/benchmark/types";
+import type { SystemCaseDef, BenchmarkRawResult } from "@/lib/benchmark/types";
 import {
   FIXTURE_SCHEDULE,
   SWAP_VALID_A,
@@ -41,7 +41,7 @@ function runOps(
   };
 }
 
-export const safetyCases: BenchmarkCase[] = [
+export const safetyCases: SystemCaseDef[] = [
   {
     id: "safety-valid-swap",
     category: "safety",

@@ -79,6 +79,16 @@ export function evaluate(
     });
   }
 
+  // maxApplied
+  if (expected.maxApplied !== undefined) {
+    const passed = raw.operationsApplied <= expected.maxApplied;
+    checks.push({
+      name: `applied <= ${expected.maxApplied}`,
+      passed,
+      detail: passed ? undefined : `got ${raw.operationsApplied}`,
+    });
+  }
+
   // maxLatencyMs
   if (expected.maxLatencyMs !== undefined) {
     const passed = raw.latencyMs <= expected.maxLatencyMs;
@@ -105,6 +115,7 @@ export function buildResult(
   const { checks, passed, score } = evaluate(raw, bc.expected);
   return {
     id: bc.id,
+    layer: bc.layer,
     category: bc.category,
     description: bc.description,
     latencyMs: raw.latencyMs,

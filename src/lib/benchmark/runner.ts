@@ -3,108 +3,171 @@ import path from "path";
 import type {
   BenchmarkResult,
   BenchmarkReport,
-  BenchmarkCategory,
+  BenchmarkLayer,
   CategorySummary,
   BenchmarkHistoryEntry,
+  BehavioralExpected,
+  BehavioralMetrics,
 } from "@/lib/benchmark/types";
+import { computeBehavioralMetrics } from "@/lib/benchmark/behavioralEvaluator";
 
-// ---------------------------------------------------------------------------
-// Report generation
-// ---------------------------------------------------------------------------
+const LAYERS: BenchmarkLayer[] = ["system", "behavioral", "adversarial"];
 
-const ALL_CATEGORIES: BenchmarkCategory[] = [
-  "retrieval",
-  "context",
-  "planning",
-  "safety",
-];
+const LAYER_LABELS: Record<BenchmarkLayer, string> = {
+  system: "LAYER 1 — SYSTEM (orchestration)",
+  behavioral: "LAYER 2 — BEHAVIORAL (AI)",
+  adversarial: "LAYER 3 — ADVERSARIAL (robustness)",
+};
 
-const CATEGORY_LABELS: Record<BenchmarkCategory, string> = {
+const CATEGORY_LABELS: Record<string, string> = {
   retrieval: "Retrieval Accuracy",
   context: "Context Management",
   planning: "Planning Intelligence",
   safety: "Mutation Safety",
+  behavioral: "Behavioral Intelligence",
+  adversarial: "Adversarial Robustness",
 };
 
-export function generateReport(results: BenchmarkResult[]): BenchmarkReport {
-  const categories = {} as Record<BenchmarkCategory, CategorySummary>;
+function layerSummary(results: BenchmarkResult[], layer: BenchmarkLayer) {
+  const subset = results.filter((r) => r.layer === layer);
+  const total = subset.length;
+  const passed = subset.filter((r) => r.passed).length;
+  const score =
+    total > 0
+      ? Math.round((subset.reduce((s, r) => s + r.score, 0) / total) * 100)
+      : 0;
+  return { score, passed, total };
+}
 
-  for (const cat of ALL_CATEGORIES) {
-    const catResults = results.filter((r) => r.category === cat);
-    const total = catResults.length;
-    const passed = catResults.filter((r) => r.passed).length;
+function avgLatency(results: BenchmarkResult[], layer?: BenchmarkLayer): number {
+  const subset = layer ? results.filter((r) => r.layer === layer) : results;
+  if (subset.length === 0) return 0;
+  return Math.round(subset.reduce((s, r) => s + r.latencyMs, 0) / subset.length);
+}
+
+export function generateReport(
+  results: BenchmarkResult[],
+  expectations?: Map<string, BehavioralExpected>
+): BenchmarkReport {
+  const layers = {} as Record<BenchmarkLayer, { score: number; passed: number; total: number }>;
+  for (const layer of LAYERS) {
+    layers[layer] = layerSummary(results, layer);
+  }
+
+  const categories: Record<string, CategorySummary> = {};
+  const categoryKeys = [...new Set(results.map((r) => r.category))];
+  for (const cat of categoryKeys) {
+    const subset = results.filter((r) => r.category === cat);
+    const total = subset.length;
+    const passed = subset.filter((r) => r.passed).length;
     const score =
       total > 0
-        ? Math.round((catResults.reduce((s, r) => s + r.score, 0) / total) * 100)
+        ? Math.round((subset.reduce((s, r) => s + r.score, 0) / total) * 100)
         : 0;
     categories[cat] = { score, passed, total };
   }
+
+  const systemOverall = layers.system?.score ?? 0;
+  const intelligenceResults = results.filter(
+    (r) => r.layer === "behavioral" || r.layer === "adversarial"
+  );
+  const intelligenceOverall =
+    intelligenceResults.length > 0
+      ? Math.round(
+          (intelligenceResults.reduce((s, r) => s + r.score, 0) /
+            intelligenceResults.length) *
+            100
+        )
+      : 0;
 
   const overall =
     results.length > 0
       ? Math.round((results.reduce((s, r) => s + r.score, 0) / results.length) * 100)
       : 0;
 
-  const avgLatencyMs =
-    results.length > 0
-      ? Math.round(results.reduce((s, r) => s + r.latencyMs, 0) / results.length)
-      : 0;
-
-  const failed = results
-    .filter((r) => !r.passed)
-    .map((r) => ({ id: r.id, description: r.description, checks: r.checks }));
+  const behavioralMetrics =
+    expectations && intelligenceResults.length > 0
+      ? computeBehavioralMetrics(results, expectations)
+      : undefined;
 
   return {
     runAt: new Date().toISOString(),
+    layers,
     categories,
+    systemOverall,
+    intelligenceOverall,
     overall,
-    avgLatencyMs,
-    failed,
+    avgLatencyMs: avgLatency(results),
+    avgLatencyMsByLayer: {
+      system: avgLatency(results, "system"),
+      behavioral: avgLatency(results, "behavioral"),
+      adversarial: avgLatency(results, "adversarial"),
+    },
+    behavioralMetrics,
+    failed: results
+      .filter((r) => !r.passed)
+      .map((r) => ({ id: r.id, description: r.description, checks: r.checks })),
   };
 }
 
-// ---------------------------------------------------------------------------
-// Console output
-// ---------------------------------------------------------------------------
+function buildBar(score: number): string {
+  const filled = Math.round(score / 10);
+  return "[" + "█".repeat(filled) + "░".repeat(10 - filled) + "]";
+}
 
 export function printReport(report: BenchmarkReport, results: BenchmarkResult[]): void {
-  const DIVIDER = "=================================";
   const line = (s: string) => process.stdout.write(s + "\n");
 
-  line("\n" + DIVIDER);
+  line("\n=================================");
   line("AI SCHEDULER BENCHMARK REPORT");
-  line(DIVIDER);
+  line("=================================");
   line(`Run: ${report.runAt}   Tests: ${results.length}`);
   line("");
 
-  line("CATEGORY SCORES");
-  line("---------------");
-  for (const cat of ALL_CATEGORIES) {
-    const s = report.categories[cat];
-    const label = CATEGORY_LABELS[cat].padEnd(26);
-    const bar = buildBar(s.score);
-    line(`${label} ${String(s.score).padStart(3)}%  ${bar}  (${s.passed}/${s.total})`);
+  for (const layer of LAYERS) {
+    const s = report.layers[layer];
+    if (s.total === 0) continue;
+    line(`${LAYER_LABELS[layer].padEnd(36)} ${String(s.score).padStart(3)}%  ${buildBar(s.score)}  (${s.passed}/${s.total})`);
   }
 
   line("");
-  const localResults = results.filter((r) => r.querySource === "local");
-  const aiResults = results.filter((r) => r.querySource === "ai");
-  const localAvg =
-    localResults.length > 0
-      ? Math.round(localResults.reduce((s, r) => s + r.latencyMs, 0) / localResults.length)
-      : null;
-  const aiAvg =
-    aiResults.length > 0
-      ? Math.round(aiResults.reduce((s, r) => s + r.latencyMs, 0) / aiResults.length)
-      : null;
-
-  const latencyParts = [`avg ${report.avgLatencyMs}ms`];
-  if (localAvg !== null) latencyParts.push(`local ${localAvg}ms`);
-  if (aiAvg !== null) latencyParts.push(`ai ${aiAvg}ms`);
-  line(`Average Response Time: ${latencyParts.join("  |  ")}`);
+  line("CATEGORY SCORES (system)");
+  line("------------------------");
+  for (const [key, label] of Object.entries(CATEGORY_LABELS)) {
+    const s = report.categories[key];
+    if (!s || key === "behavioral" || key === "adversarial") continue;
+    line(`${label.padEnd(26)} ${String(s.score).padStart(3)}%  ${buildBar(s.score)}  (${s.passed}/${s.total})`);
+  }
 
   line("");
-  line(`OVERALL SCORE: ${report.overall}%`);
+  line(`System overall:        ${report.systemOverall}%`);
+  if (report.intelligenceOverall > 0 || results.some((r) => r.layer !== "system")) {
+    line(`Intelligence overall:  ${report.intelligenceOverall}%`);
+  }
+  line(`Combined overall:      ${report.overall}%`);
+
+  const latParts: string[] = [];
+  if (report.avgLatencyMsByLayer.system != null) {
+    latParts.push(`system ${report.avgLatencyMsByLayer.system}ms`);
+  }
+  if (report.avgLatencyMsByLayer.behavioral != null && report.layers.behavioral.total > 0) {
+    latParts.push(`AI ${report.avgLatencyMsByLayer.behavioral}ms`);
+  }
+  line("");
+  line(`Average latency: ${latParts.join("  |  ") || `${report.avgLatencyMs}ms`}`);
+
+  if (report.behavioralMetrics) {
+    const m = report.behavioralMetrics;
+    line("");
+    line("BEHAVIORAL METRICS");
+    line("------------------");
+    line(`  hallucinationRate:           ${m.hallucinationRate}%`);
+    line(`  incompletePlanningRate:      ${m.incompletePlanningRate}%`);
+    line(`  overModificationRate:        ${m.overModificationRate}%`);
+    line(`  interpretationAccuracy:      ${m.interpretationAccuracy}%`);
+    line(`  ambiguityResolutionQuality:  ${m.ambiguityResolutionQuality}%`);
+    line(`  reasoningConsistency:        ${m.reasoningConsistency}% (reserved)`);
+  }
 
   if (report.failed.length > 0) {
     line("");
@@ -121,18 +184,8 @@ export function printReport(report: BenchmarkReport, results: BenchmarkResult[])
     line("");
     line("All tests passed.");
   }
-
   line("");
 }
-
-function buildBar(score: number): string {
-  const filled = Math.round(score / 10);
-  return "[" + "█".repeat(filled) + "░".repeat(10 - filled) + "]";
-}
-
-// ---------------------------------------------------------------------------
-// History storage
-// ---------------------------------------------------------------------------
 
 const HISTORY_DIR = path.resolve(process.cwd(), ".benchmark-results");
 const MAX_HISTORY_FILES = 20;
@@ -150,7 +203,6 @@ export function saveHistory(
     const entry: BenchmarkHistoryEntry = { report, results };
     fs.writeFileSync(filePath, JSON.stringify(entry, null, 2), "utf-8");
 
-    // Prune old files
     const files = fs
       .readdirSync(HISTORY_DIR)
       .filter((f) => f.endsWith(".json"))
@@ -161,7 +213,7 @@ export function saveHistory(
       }
     }
   } catch {
-    // History write is best-effort — never fail the benchmark run.
+    /* best-effort */
   }
 }
 
@@ -189,30 +241,32 @@ export function loadHistory(): BenchmarkHistoryEntry[] {
   }
 }
 
-/**
- * Print a comparison between the latest run and the previous run.
- * Call after printReport if history has ≥ 2 entries.
- */
 export function printDiff(current: BenchmarkReport): void {
   const history = loadHistory();
   if (history.length < 2) return;
   const previous = history[history.length - 2]!.report;
+  if (!previous.layers) return;
 
   process.stdout.write("\nCOMPARED TO PREVIOUS RUN\n");
   process.stdout.write("------------------------\n");
-  for (const cat of ALL_CATEGORIES) {
-    const prev = previous.categories[cat]?.score ?? 0;
-    const curr = current.categories[cat]?.score ?? 0;
+  for (const layer of LAYERS) {
+    const prev = previous.layers[layer]?.score ?? 0;
+    const curr = current.layers[layer]?.score ?? 0;
     const delta = curr - prev;
     const sign = delta > 0 ? "+" : "";
     const indicator = delta > 0 ? "▲" : delta < 0 ? "▼" : "·";
     process.stdout.write(
-      `${CATEGORY_LABELS[cat].padEnd(26)} ${indicator} ${sign}${delta}%\n`
+      `${LAYER_LABELS[layer].padEnd(36)} ${indicator} ${sign}${delta}%\n`
     );
   }
-  const overallDelta = current.overall - previous.overall;
-  const overallSign = overallDelta > 0 ? "+" : "";
+  const intelDelta = current.intelligenceOverall - (previous.intelligenceOverall ?? 0);
   process.stdout.write(
-    `${"Overall".padEnd(26)} ${overallSign}${overallDelta}%\n\n`
+    `${"Intelligence overall".padEnd(36)} ${intelDelta > 0 ? "▲" : intelDelta < 0 ? "▼" : "·"} ${intelDelta > 0 ? "+" : ""}${intelDelta}%\n\n`
   );
+}
+
+export function buildExpectationsMap(
+  cases: Array<{ id: string; expected: BehavioralExpected }>
+): Map<string, BehavioralExpected> {
+  return new Map(cases.map((c) => [c.id, c.expected as BehavioralExpected]));
 }

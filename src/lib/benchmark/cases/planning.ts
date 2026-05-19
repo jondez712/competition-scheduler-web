@@ -1,4 +1,4 @@
-import type { BenchmarkCase, BenchmarkRawResult } from "@/lib/benchmark/types";
+import type { SystemCaseDef, BenchmarkRawResult } from "@/lib/benchmark/types";
 import {
   FIXTURE_SCHEDULE,
   LARKIN_ENTRIES,
@@ -69,7 +69,7 @@ function buildBulkLarkinOps(useAllPairs: boolean): ScheduleAssistantOp[] {
 // Planning test cases
 // ---------------------------------------------------------------------------
 
-export const planningCases: BenchmarkCase[] = [
+export const planningCases: SystemCaseDef[] = [
   {
     id: "planning-classifier-routes-to-ai",
     category: "planning",

@@ -1,4 +1,4 @@
-import type { BenchmarkCase, BenchmarkRawResult } from "@/lib/benchmark/types";
+import type { SystemCaseDef, BenchmarkRawResult } from "@/lib/benchmark/types";
 import type { ScheduleQueryFilters } from "@/lib/schedule/assistantIntentFilter";
 import {
   FIXTURE_SCHEDULE,
@@ -72,7 +72,7 @@ async function runWithContext(
 // Context management test cases
 // ---------------------------------------------------------------------------
 
-export const contextCases: BenchmarkCase[] = [
+export const contextCases: SystemCaseDef[] = [
   {
     id: "context-filter-persist",
     category: "context",

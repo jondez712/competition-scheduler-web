@@ -2,56 +2,80 @@
 // AI Scheduler Benchmark Framework — Type Definitions
 // ---------------------------------------------------------------------------
 
-export type BenchmarkCategory = "retrieval" | "context" | "planning" | "safety";
+export type BenchmarkLayer = "system" | "behavioral" | "adversarial";
+
+/** Layer 1 categories (deterministic orchestration). */
+export type SystemBenchmarkCategory = "retrieval" | "context" | "planning" | "safety";
+
+/** Layer 2/3 use broader category labels in reports. */
+export type IntelligenceBenchmarkCategory = "behavioral" | "adversarial";
+
+export type BenchmarkCategory = SystemBenchmarkCategory | IntelligenceBenchmarkCategory;
 
 /**
  * Declarative expectations for a benchmark case result.
  * The evaluator converts these into individual pass/fail checks.
  */
 export type BenchmarkExpected = {
-  /** Which execution path the result must come from. */
   querySource?: "local" | "ai";
-  /** Substrings that must appear in the reply (case-insensitive). */
   mustInclude?: string[];
-  /** Substrings that must NOT appear in the reply (case-insensitive). */
   mustNotInclude?: string[];
-  /** Exact number of operations that should be applied. */
   appliedCount?: number;
-  /** Exact number of operations that should be skipped. */
   skippedCount?: number;
-  /** Minimum number of applied operations (for bulk planning tests). */
   minApplied?: number;
-  /** Response must complete within this many milliseconds. */
+  maxApplied?: number;
   maxLatencyMs?: number;
-  /**
-   * Filter dimension keys that must be non-empty after parsing.
-   * E.g. ["studioHints"] means the parsed filters must have studioHints.length > 0.
-   */
-  filtersApplied?: Array<keyof import("@/lib/schedule/assistantIntentFilter").ScheduleQueryFilters>;
+  filtersApplied?: Array<
+    keyof import("@/lib/schedule/assistantIntentFilter").ScheduleQueryFilters
+  >;
 };
 
-export type BenchmarkCase = {
+/** Layer 2/3 extended expectations for AI behavioral evaluation. */
+export type BehavioralExpected = BenchmarkExpected & {
+  /** When false, expect clarification (0 ops) rather than blind mutation. */
+  expectMutation?: boolean;
+  /** Concepts that should appear in the reply (interpretation accuracy). */
+  mustMention?: string[];
+  /** All swap entry IDs must exist in the schedule fixture. */
+  validEntryIdsOnly?: boolean;
+  /** Force response from AI path (not local fast path). */
+  querySourceMustBe?: "ai";
+  /** Minimum score (0–1) to count as pass for weighted behavioral cases. */
+  minPassScore?: number;
+};
+
+/** System-layer case definitions (layer added in cases/index.ts). */
+export type SystemCaseDef = {
   id: string;
-  category: BenchmarkCategory;
+  category: SystemBenchmarkCategory;
   description: string;
-  /** Async function that executes the test and returns a raw result. */
   run: () => Promise<BenchmarkRawResult>;
   expected: BenchmarkExpected;
 };
 
-/** Raw output from a benchmark case's run function — before scoring. */
+export type BenchmarkCase = {
+  id: string;
+  layer: BenchmarkLayer;
+  category: BenchmarkCategory;
+  description: string;
+  run: () => Promise<BenchmarkRawResult>;
+  expected: BenchmarkExpected | BehavioralExpected;
+};
+
 export type BenchmarkRawResult = {
   reply: string;
   querySource?: "local" | "ai";
   operationsApplied: number;
   operationsSkipped: number;
   latencyMs: number;
-  /** Any extra diagnostic data the case wants to surface. */
+  /** Proposed ops before apply (for AI benchmarks). */
+  proposedOps?: import("@/lib/schedule/scheduleAssistantOps").ScheduleAssistantOp[];
   extra?: Record<string, unknown>;
 };
 
 export type BenchmarkResult = {
   id: string;
+  layer: BenchmarkLayer;
   category: BenchmarkCategory;
   description: string;
   latencyMs: number;
@@ -61,21 +85,41 @@ export type BenchmarkResult = {
   operationsSkipped: number;
   checks: Array<{ name: string; passed: boolean; detail?: string }>;
   passed: boolean;
-  score: number; // 0–1, fraction of checks that passed
+  score: number;
   extra?: Record<string, unknown>;
 };
 
 export type CategorySummary = {
-  score: number;   // 0–100
+  score: number;
+  passed: number;
+  total: number;
+};
+
+export type BehavioralMetrics = {
+  hallucinationRate: number;
+  incompletePlanningRate: number;
+  overModificationRate: number;
+  interpretationAccuracy: number;
+  ambiguityResolutionQuality: number;
+  reasoningConsistency: number;
+};
+
+export type LayerSummary = {
+  score: number;
   passed: number;
   total: number;
 };
 
 export type BenchmarkReport = {
   runAt: string;
-  categories: Record<BenchmarkCategory, CategorySummary>;
-  overall: number; // 0–100
+  layers: Record<BenchmarkLayer, LayerSummary>;
+  categories: Record<string, CategorySummary>;
+  systemOverall: number;
+  intelligenceOverall: number;
+  overall: number;
   avgLatencyMs: number;
+  avgLatencyMsByLayer: Partial<Record<BenchmarkLayer, number>>;
+  behavioralMetrics?: BehavioralMetrics;
   failed: Array<{ id: string; description: string; checks: BenchmarkResult["checks"] }>;
 };
 

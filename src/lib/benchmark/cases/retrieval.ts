@@ -1,4 +1,4 @@
-import type { BenchmarkCase, BenchmarkRawResult } from "@/lib/benchmark/types";
+import type { SystemCaseDef, BenchmarkRawResult } from "@/lib/benchmark/types";
 import {
   FIXTURE_SCHEDULE,
   STAGE1_DAY1_FIRST,
@@ -64,7 +64,7 @@ async function runLocalQuery(query: string): Promise<BenchmarkRawResult> {
 // Retrieval test cases
 // ---------------------------------------------------------------------------
 
-export const retrievalCases: BenchmarkCase[] = [
+export const retrievalCases: SystemCaseDef[] = [
   {
     id: "retrieval-mini-count",
     category: "retrieval",
