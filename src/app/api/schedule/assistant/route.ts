@@ -499,6 +499,12 @@ You MUST respond with ONLY valid JSON (no prose outside JSON) in this exact shap
       let lineBuffer = "";
       let content = "";
 
+      // Reasoning models (o-series) can think silently for 20–60 s before the first token.
+      // Send an SSE comment every 8 s so Netlify's proxy doesn't see silence and 504.
+      const heartbeat = setInterval(() => {
+        try { controller.enqueue(encoder.encode(": heartbeat\n\n")); } catch { /* closed */ }
+      }, 8_000);
+
       try {
         while (true) {
           const { done, value } = await openAIReader.read();
@@ -553,6 +559,8 @@ You MUST respond with ONLY valid JSON (no prose outside JSON) in this exact shap
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Stream error";
         controller.enqueue(sseEvent({ type: "error", error: msg }));
+      } finally {
+        clearInterval(heartbeat);
       }
 
       controller.close();
