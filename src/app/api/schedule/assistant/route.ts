@@ -364,12 +364,32 @@ Locked studios (automated edits): Staff locked these competing studios — do **
     }
   }
 
+  // On follow-up turns (prior assistant message exists) skip expensive O(n²) overlap analysis and
+  // automated findings — the model already has that context from the first turn.
+  const isFollowUp = messages.some((m) => m.role === "assistant");
+
   const dayLegend = schedule.length ? scheduleDayLegend(schedule, timeZone) : "";
-  const overlapVerified = schedule.length
-    ? verifiedSameStudioTimeOverlapsBlock(schedule, timeZone)
-    : "";
+  const overlapVerified =
+    schedule.length && !isFollowUp
+      ? (() => {
+          try {
+            return verifiedSameStudioTimeOverlapsBlock(schedule, timeZone);
+          } catch {
+            return "(overlap analysis unavailable)";
+          }
+        })()
+      : "(overlap analysis omitted on follow-up — see first response)";
   const tsv = schedule.length ? scheduleTsvForAssistant(schedule, timeZone) : "(empty schedule)";
-  const findings = schedule.length ? findingsSummary(schedule, timeZone) : "";
+  const findings =
+    schedule.length && !isFollowUp
+      ? (() => {
+          try {
+            return findingsSummary(schedule, timeZone);
+          } catch {
+            return "(automated checks unavailable)";
+          }
+        })()
+      : "";
 
   let hitchBlock = "";
   const rawCid = body.competitionId;

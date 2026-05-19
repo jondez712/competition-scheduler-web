@@ -12,7 +12,7 @@ import { applyScheduleAssistantOps, type ScheduleAssistantOp } from "@/lib/sched
 type ChatMessage = { role: "user" | "assistant"; content: string };
 
 /** Server caps at 1200 rows in deserializeSchedule — no point sending more. */
-const WIRE_SCHEDULE_ROW_LIMIT = 1200;
+const WIRE_SCHEDULE_ROW_LIMIT = 600;
 
 function serializeForApi(rows: ScheduledRoutine[]) {
   return rows.slice(0, WIRE_SCHEDULE_ROW_LIMIT).map((r) => ({
@@ -199,20 +199,35 @@ export function ScheduleAssistantSidebar({
       if (lockedStudios.length > 0) {
         payload.lockedStudios = lockedStudios;
       }
+      const bodyStr = JSON.stringify(payload);
+      const bodySizeKb = Math.round(bodyStr.length / 1024);
+      if (process.env.NODE_ENV === "development" || process.env.NEXT_PUBLIC_PUBLISH_PREVIEW === "1") {
+        console.debug(`[assistant] request body: ${bodySizeKb} KB (schedule rows: ${(payload.schedule as unknown[]).length})`);
+      }
+      if (bodySizeKb > 5_000) {
+        const msg = `Request body too large (${bodySizeKb} KB > 5 MB limit) — please refresh the page and try again.`;
+        setLastError(msg);
+        setMessages((m) => [...m, { role: "assistant", content: assistantFailureBubble(413, msg) }]);
+        return;
+      }
       const res = await fetch("/api/schedule/assistant", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: bodyStr,
       });
 
       // Route now streams SSE — if we got a non-2xx before any SSE data it's a plain JSON error.
       if (!res.ok || !res.body) {
-        const rawRes = await (res.body ? res.text() : Promise.resolve(""));
+        const rawRes = res.body ? await res.text().catch(() => "") : "";
         let errMsg = `Request failed (${res.status})`;
         try {
           const parsed = JSON.parse(rawRes) as { error?: string };
           if (parsed.error) errMsg = parsed.error;
-        } catch { /* ignore */ }
+        } catch {
+          // Not JSON (e.g. Netlify HTML error page) — surface the raw text so it's diagnosable.
+          const plain = rawRes.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+          if (plain) errMsg = `Request failed (${res.status}): ${plain}`;
+        }
         setLastError(errMsg);
         setMessages((m) => [...m, { role: "assistant", content: assistantFailureBubble(res.status, errMsg) }]);
         return;

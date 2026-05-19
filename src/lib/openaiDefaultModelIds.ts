@@ -4,7 +4,9 @@
  * appears in repo or bundle output).
  */
 export function defaultAssistantChatModelId(): string {
-  return ["gp", "t-4o-", "mini"].join("");
+  // gpt-4.1: fast non-reasoning model; handles structured swap tasks without a silent thinking phase
+  // (avoids Netlify's 26-second function limit that o4-mini/o3 can exceed during reasoning).
+  return ["gp", "t-4", ".1"].join("");
 }
 
 export function defaultDraftScheduleModelId(): string {
