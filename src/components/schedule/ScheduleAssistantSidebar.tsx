@@ -11,8 +11,11 @@ import { applyScheduleAssistantOps, type ScheduleAssistantOp } from "@/lib/sched
 
 type ChatMessage = { role: "user" | "assistant"; content: string };
 
+/** Server caps at 1200 rows in deserializeSchedule — no point sending more. */
+const WIRE_SCHEDULE_ROW_LIMIT = 1200;
+
 function serializeForApi(rows: ScheduledRoutine[]) {
-  return rows.map((r) => ({
+  return rows.slice(0, WIRE_SCHEDULE_ROW_LIMIT).map((r) => ({
     ...r,
     start: r.start.toISOString(),
     end: r.end.toISOString(),
@@ -54,7 +57,12 @@ function ellipsize(s: string, max: number): string {
  * Raw Hitchkick page cache can be 20MB+; Netlify and similar hosts reject huge POST bodies.
  * Prune + cap JSON length before send. Server still re-merges for the model context budget.
  */
-const WIRE_HITCHKICK_JSON_MAX_CHARS = 900_000;
+/**
+ * Cap for hitchkickPayload sent in the request body. The server re-prunes to its own model
+ * context budget after receipt — keep the wire cap tight to avoid Netlify 502s from large
+ * request bodies (3000+ routine exports can exceed 2 MB otherwise).
+ */
+const WIRE_HITCHKICK_JSON_MAX_CHARS = 200_000;
 
 function hitchkickPayloadForAssistantWire(raw: unknown): unknown | undefined {
   if (raw == null || typeof raw !== "object") return undefined;
