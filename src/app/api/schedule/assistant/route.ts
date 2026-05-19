@@ -445,8 +445,15 @@ You MUST respond with ONLY valid JSON (no prose outside JSON) in this exact shap
     .map((m) => `${m.role}: ${m.content}`)
     .join("\n")}`;
 
+  const encoder = new TextEncoder();
+
+  function sseEvent(data: Record<string, unknown>): Uint8Array {
+    return encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
+  }
+
+  let openAIRes: Response;
   try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    openAIRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -456,6 +463,7 @@ You MUST respond with ONLY valid JSON (no prose outside JSON) in this exact shap
         model,
         ...(temperature !== undefined ? { temperature } : {}),
         response_format: { type: "json_object" },
+        stream: true,
         messages: [
           { role: "system", content: system },
           { role: "user", content: userBlock },
@@ -463,40 +471,96 @@ You MUST respond with ONLY valid JSON (no prose outside JSON) in this exact shap
       }),
       cache: "no-store",
     });
-
-    if (!res.ok) {
-      const t = await res.text().catch(() => "");
-      return NextResponse.json(
-        { error: `OpenAI error: ${res.status} ${t.slice(0, 400)}` },
-        { status: 502 }
-      );
-    }
-
-    const data = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) {
-      return NextResponse.json({ error: "Empty model response" }, { status: 502 });
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(stripCodeFence(content));
-    } catch {
-      return NextResponse.json(
-        { error: "Model did not return valid JSON", raw: content.slice(0, 500) },
-        { status: 502 }
-      );
-    }
-
-    const obj = parsed as { reply?: string; operations?: unknown };
-    const reply = typeof obj.reply === "string" ? obj.reply : "Here’s what I found.";
-    const operations = Array.isArray(obj.operations) ? obj.operations : [];
-
-    return NextResponse.json({ reply, operations });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Assistant request failed";
     return NextResponse.json({ error: msg }, { status: 500 });
   }
+
+  if (!openAIRes.ok) {
+    const t = await openAIRes.text().catch(() => "");
+    return NextResponse.json(
+      { error: `OpenAI error: ${openAIRes.status} ${t.slice(0, 400)}` },
+      { status: 502 }
+    );
+  }
+
+  if (!openAIRes.body) {
+    return NextResponse.json({ error: "Empty OpenAI response body" }, { status: 502 });
+  }
+
+  const openAIReader = openAIRes.body.getReader();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const decoder = new TextDecoder();
+      let lineBuffer = "";
+      let content = "";
+
+      try {
+        while (true) {
+          const { done, value } = await openAIReader.read();
+          if (done) break;
+
+          lineBuffer += decoder.decode(value, { stream: true });
+          const lines = lineBuffer.split("\n");
+          lineBuffer = lines.pop() ?? "";
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith("data: ")) continue;
+            const payload = trimmed.slice(6).trim();
+            if (payload === "[DONE]") continue;
+            try {
+              const chunk = JSON.parse(payload) as {
+                choices?: Array<{ delta?: { content?: string } }>;
+              };
+              const delta = chunk.choices?.[0]?.delta?.content;
+              if (delta) {
+                content += delta;
+                // Forward each token immediately — keeps the Netlify connection alive.
+                controller.enqueue(sseEvent({ type: "chunk", content: delta }));
+              }
+            } catch {
+              // malformed SSE line from OpenAI — skip
+            }
+          }
+        }
+
+        if (!content) {
+          controller.enqueue(sseEvent({ type: "error", error: "Empty model response" }));
+          controller.close();
+          return;
+        }
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(stripCodeFence(content));
+        } catch {
+          controller.enqueue(
+            sseEvent({ type: "error", error: "Model did not return valid JSON", raw: content.slice(0, 500) })
+          );
+          controller.close();
+          return;
+        }
+
+        const obj = parsed as { reply?: string; operations?: unknown };
+        const reply = typeof obj.reply === "string" ? obj.reply : "Here’s what I found.";
+        const operations = Array.isArray(obj.operations) ? obj.operations : [];
+        controller.enqueue(sseEvent({ type: "done", reply, operations }));
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Stream error";
+        controller.enqueue(sseEvent({ type: "error", error: msg }));
+      }
+
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
 }

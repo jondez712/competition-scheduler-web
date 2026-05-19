@@ -196,24 +196,61 @@ export function ScheduleAssistantSidebar({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const rawRes = await res.text();
-      let data: { error?: string; reply?: string; operations?: ScheduleAssistantOp[] } = {};
-      if (rawRes.trim()) {
+
+      // Route now streams SSE — if we got a non-2xx before any SSE data it's a plain JSON error.
+      if (!res.ok || !res.body) {
+        const rawRes = await (res.body ? res.text() : Promise.resolve(""));
+        let errMsg = `Request failed (${res.status})`;
         try {
-          data = JSON.parse(rawRes) as typeof data;
-        } catch {
-          setLastError(`HTTP ${res.status}: ${rawRes.replace(/\s+/g, " ").slice(0, 280)}`);
-          setMessages((m) => [...m, { role: "assistant", content: assistantFailureBubble(res.status, rawRes) }]);
-          return;
-        }
-      }
-      if (!res.ok) {
-        setLastError(data.error || `Request failed (${res.status})`);
-        setMessages((m) => [...m, { role: "assistant", content: assistantFailureBubble(res.status, data.error) }]);
+          const parsed = JSON.parse(rawRes) as { error?: string };
+          if (parsed.error) errMsg = parsed.error;
+        } catch { /* ignore */ }
+        setLastError(errMsg);
+        setMessages((m) => [...m, { role: "assistant", content: assistantFailureBubble(res.status, errMsg) }]);
         return;
       }
-      const reply = typeof data.reply === "string" ? data.reply : "";
-      const ops = Array.isArray(data.operations) ? data.operations : [];
+
+      // Consume the SSE stream; each line is `data: <JSON>\n\n`.
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let sseBuffer = "";
+      let reply = "";
+      let ops: ScheduleAssistantOp[] = [];
+      let streamError: string | null = null;
+
+      outer: while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        sseBuffer += dec.decode(value, { stream: true });
+        const lines = sseBuffer.split("\n");
+        sseBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data: ")) continue;
+          try {
+            const evt = JSON.parse(trimmed.slice(6)) as {
+              type: string; content?: string; reply?: string;
+              operations?: ScheduleAssistantOp[]; error?: string; raw?: string;
+            };
+            if (evt.type === "chunk") {
+              // tokens streaming in — nothing to do yet (could show a typing indicator)
+            } else if (evt.type === "done") {
+              reply = typeof evt.reply === "string" ? evt.reply : "";
+              ops = Array.isArray(evt.operations) ? evt.operations : [];
+              break outer;
+            } else if (evt.type === "error") {
+              streamError = evt.error ?? "Unknown assistant error";
+              break outer;
+            }
+          } catch { /* malformed line */ }
+        }
+      }
+
+      if (streamError) {
+        setLastError(streamError);
+        setMessages((m) => [...m, { role: "assistant", content: assistantFailureBubble(200, streamError ?? "") }]);
+        return;
+      }
       const infoOnly = looksLikeScheduleInfoOnly(text);
       let appliedNote = "";
       let assistantBody = reply.trim();
