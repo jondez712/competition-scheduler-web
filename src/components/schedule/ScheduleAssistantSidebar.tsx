@@ -11,11 +11,32 @@ import { applyScheduleAssistantOps, type ScheduleAssistantOp } from "@/lib/sched
 
 type ChatMessage = { role: "user" | "assistant"; content: string };
 
-/** Server caps at 1200 rows in deserializeSchedule — no point sending more. */
-const WIRE_SCHEDULE_ROW_LIMIT = 600;
+/**
+ * Max rows sent per request. Rows are distributed evenly across calendar days so every
+ * competition day is visible to the model regardless of event length.
+ */
+const WIRE_SCHEDULE_ROW_LIMIT = 1200;
 
 function serializeForApi(rows: ScheduledRoutine[]) {
-  return rows.slice(0, WIRE_SCHEDULE_ROW_LIMIT).map((r) => ({
+  // Group by calendar day so we can sample proportionally — a naive slice(0, N) only
+  // covers the first 1-2 days of a multi-day event and the model never sees the rest.
+  const byDay = new Map<string, ScheduledRoutine[]>();
+  for (const r of rows) {
+    const arr = byDay.get(r.calendarDayKey) ?? [];
+    arr.push(r);
+    byDay.set(r.calendarDayKey, arr);
+  }
+  const numDays = byDay.size || 1;
+  const perDay = Math.max(50, Math.floor(WIRE_SCHEDULE_ROW_LIMIT / numDays));
+
+  const selected: ScheduledRoutine[] = [];
+  for (const [, dayRows] of byDay) {
+    // Sort by start time so the earliest (first-slot) routines are always included.
+    const sorted = [...dayRows].sort((a, b) => a.start.getTime() - b.start.getTime());
+    selected.push(...sorted.slice(0, perDay));
+  }
+
+  return selected.map((r) => ({
     ...r,
     start: r.start.toISOString(),
     end: r.end.toISOString(),
