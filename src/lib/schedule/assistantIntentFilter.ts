@@ -273,3 +273,57 @@ export function applyQueryFilters(
 
   return [...filtered, ...anchors];
 }
+
+/**
+ * Pure dimension-filter with no anchor rows appended.
+ * Used by local query executors (assistantLocalQuery.ts) which need accurate
+ * counts and positions without the anchor padding added for AI context.
+ */
+export function filterScheduleRows(
+  schedule: ScheduledRoutine[],
+  filters: ScheduleQueryFilters
+): ScheduledRoutine[] {
+  if (!hasAnyFilters(filters)) return schedule;
+
+  let result = schedule;
+
+  if (filters.stages?.length) {
+    const stageSet = new Set(filters.stages);
+    result = result.filter((r) => stageSet.has(r.stageNum));
+  }
+
+  if (filters.dayKeys?.length) {
+    const daySet = new Set(filters.dayKeys);
+    result = result.filter((r) => daySet.has(r.calendarDayKey));
+  }
+
+  if (filters.levelHints?.length) {
+    const hints = filters.levelHints.map((h) => h.toLowerCase());
+    result = result.filter((r) =>
+      hints.some((h) => r.levelName.toLowerCase().includes(h))
+    );
+  }
+
+  if (filters.divisionHints?.length) {
+    const hints = filters.divisionHints.map((h) => h.toLowerCase());
+    result = result.filter((r) =>
+      hints.some((h) => r.divisionName.toLowerCase().includes(h))
+    );
+  }
+
+  if (filters.studioHints?.length) {
+    const hints = filters.studioHints.map((h) => h.toLowerCase());
+    result = result.filter((r) =>
+      hints.some((h) => r.studioName.toLowerCase().includes(h))
+    );
+  }
+
+  if (filters.categoryHints?.length) {
+    const hints = filters.categoryHints.map((h) => h.toLowerCase());
+    result = result.filter((r) =>
+      hints.some((h) => r.categoryName.toLowerCase().includes(h))
+    );
+  }
+
+  return result;
+}

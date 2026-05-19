@@ -12,11 +12,16 @@ import { openaiAssistantEnvKeys } from "@/lib/openaiAssistantEnvKeys";
 import {
   applyQueryFilters,
   buildDayKeyToLabel,
+  filterScheduleRows,
   hasAnyFilters,
   mergeFilters,
   parseQueryFilters,
   type ScheduleQueryFilters,
 } from "@/lib/schedule/assistantIntentFilter";
+import {
+  classifyLocalQuery,
+  executeLocalQuery,
+} from "@/lib/schedule/assistantLocalQuery";
 import {
   SCHEDULE_ASSISTANT_TOOLS,
   toolCallToOpsResult,
@@ -411,6 +416,45 @@ export async function POST(request: Request) {
   const filteredEntryIds = contextRows.map((r) => r.scheduleEntryId);
   const isFiltered = hasAnyFilters(mergedFilters);
 
+  // ---- Local query fast path -----------------------------------------------
+  // Deterministic queries (counts, first/last, timing, listing) are answered
+  // instantly without invoking OpenAI — zero tokens, zero latency.
+  const reqStart = Date.now();
+  const localIntent = classifyLocalQuery(lastUserQuery, mergedFilters);
+  if (localIntent && contextRows.length > 0) {
+    const localRows = filterScheduleRows(schedule, mergedFilters);
+    const reply = executeLocalQuery(
+      localIntent,
+      localRows,
+      schedule,
+      timeZone,
+      dayKeyToLabel,
+      mergedFilters,
+      lastUserQuery
+    );
+    const responseMs = Date.now() - reqStart;
+    console.log(
+      `[assistant] source=local kind=${localIntent.kind} rows=${localRows.length} ` +
+        `total=${schedule.length} ms=${responseMs}`
+    );
+    const enc = new TextEncoder();
+    const body = enc.encode(
+      `data: ${JSON.stringify({
+        type: "done",
+        reply,
+        operations: [],
+        activeFilters: mergedFilters,
+        filteredEntryIds,
+        querySource: "local",
+        responseMs,
+      })}\n\n`
+    );
+    return new Response(body, {
+      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+    });
+  }
+  // ---- OpenAI reasoning path -----------------------------------------------
+
   // Day legend always reflects the full schedule so the model knows all available days.
   const dayLegend = schedule.length ? scheduleDayLegend(schedule, timeZone) : "";
 
@@ -659,6 +703,12 @@ ${messages
 
         const { reply, operations } = toolCallToOpsResult(toolName, parsedArgs);
 
+        const responseMs = Date.now() - reqStart;
+        console.log(
+          `[assistant] source=ai model=${model} contextRows=${contextRows.length} ` +
+            `total=${schedule.length} ms=${responseMs}`
+        );
+
         controller.enqueue(
           sseEvent({
             type: "done",
@@ -667,6 +717,8 @@ ${messages
             // Return active filter context so the client can carry it forward.
             activeFilters: mergedFilters,
             filteredEntryIds,
+            querySource: "ai",
+            responseMs,
           })
         );
       } catch (e) {

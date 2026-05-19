@@ -10,7 +10,11 @@ import { studioLockKeysFromList } from "@/lib/schedule/studioLock";
 import { applyScheduleAssistantOps, type ScheduleAssistantOp } from "@/lib/schedule/scheduleAssistantOps";
 import type { ScheduleQueryFilters } from "@/lib/schedule/assistantIntentFilter";
 
-type ChatMessage = { role: "user" | "assistant"; content: string };
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+  querySource?: "local" | "ai";
+};
 
 type AssistantActiveContext = {
   /** Filters that were active for the prior turn — carried forward to resolve "those"/"them". */
@@ -157,6 +161,8 @@ export function ScheduleAssistantSidebar({
   const [lastError, setLastError] = useState<string | null>(null);
   /** Active filter context from the most recent assistant response. */
   const [activeContext, setActiveContext] = useState<AssistantActiveContext | null>(null);
+  /** Running tally of local vs AI responses for the current session. */
+  const [stats, setStats] = useState({ local: 0, ai: 0 });
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const canSend = schedule.length > 0 && !loading && !disabledReason;
@@ -259,6 +265,7 @@ export function ScheduleAssistantSidebar({
       let streamError: string | null = null;
       let nextActiveFilters: ScheduleQueryFilters | undefined;
       let nextFilteredEntryIds: string[] | undefined;
+      let nextQuerySource: "local" | "ai" | undefined;
 
       outer: while (true) {
         const { done, value } = await reader.read();
@@ -279,6 +286,8 @@ export function ScheduleAssistantSidebar({
               raw?: string;
               activeFilters?: ScheduleQueryFilters;
               filteredEntryIds?: string[];
+              querySource?: "local" | "ai";
+              responseMs?: number;
             };
             if (evt.type === "chunk") {
               // Tool-call argument chunks — no visible content to render yet.
@@ -287,6 +296,7 @@ export function ScheduleAssistantSidebar({
               ops = Array.isArray(evt.operations) ? evt.operations : [];
               nextActiveFilters = evt.activeFilters;
               nextFilteredEntryIds = evt.filteredEntryIds;
+              nextQuerySource = evt.querySource;
               break outer;
             } else if (evt.type === "error") {
               streamError = evt.error ?? "Unknown assistant error";
@@ -315,6 +325,11 @@ export function ScheduleAssistantSidebar({
         });
       }
 
+      // Track local vs AI stats for the session.
+      if (nextQuerySource) {
+        setStats((s) => ({ ...s, [nextQuerySource!]: s[nextQuerySource!] + 1 }));
+      }
+
       const infoOnly = looksLikeScheduleInfoOnly(text);
       let appliedNote = "";
       const assistantBody = reply.trim();
@@ -339,7 +354,11 @@ export function ScheduleAssistantSidebar({
 
       setMessages((m) => [
         ...m,
-        { role: "assistant", content: `${assistantBody}${appliedNote}`.trim() },
+        {
+          role: "assistant",
+          content: `${assistantBody}${appliedNote}`.trim(),
+          querySource: nextQuerySource,
+        },
       ]);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Network error";
@@ -379,7 +398,14 @@ export function ScheduleAssistantSidebar({
       <div className={`flex shrink-0 items-center ${open ? "justify-between gap-2" : "justify-center"}`}>
         {open ? (
           <>
-            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Schedule assistant</h2>
+            <div className="flex min-w-0 flex-1 items-baseline gap-2">
+              <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Schedule assistant</h2>
+              {(stats.local > 0 || stats.ai > 0) ? (
+                <span className="text-[10px] text-zinc-400 dark:text-zinc-500" title="Local (instant) vs AI responses this session">
+                  Local: {stats.local}&nbsp; AI: {stats.ai}
+                </span>
+              ) : null}
+            </div>
             <button
               type="button"
               onClick={() => setOpen(false)}
@@ -458,8 +484,18 @@ export function ScheduleAssistantSidebar({
                           : "mr-4 bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100"
                       }`}
                     >
-                      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                        {msg.role === "user" ? "You" : "Assistant"}
+                      <div className="mb-0.5 flex items-center justify-between gap-1">
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                          {msg.role === "user" ? "You" : "Assistant"}
+                        </span>
+                        {msg.role === "assistant" && msg.querySource === "local" ? (
+                          <span
+                            className="rounded bg-emerald-100 px-1 py-0.5 text-[9px] font-semibold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
+                            title="Answered instantly without AI"
+                          >
+                            ⚡ Instant
+                          </span>
+                        ) : null}
                       </div>
                       <div className="whitespace-pre-wrap break-words">{msg.content}</div>
                     </div>
