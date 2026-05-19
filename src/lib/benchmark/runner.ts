@@ -8,6 +8,8 @@ import type {
   BenchmarkHistoryEntry,
   BehavioralExpected,
   BehavioralMetrics,
+  InfrastructureMetrics,
+  TokenEconomyMetrics,
 } from "@/lib/benchmark/types";
 import { computeBehavioralMetrics } from "@/lib/benchmark/behavioralEvaluator";
 
@@ -71,11 +73,14 @@ export function generateReport(
   const intelligenceResults = results.filter(
     (r) => r.layer === "behavioral" || r.layer === "adversarial"
   );
+  // Exclude infrastructure failures from the intelligence score — they reflect
+  // API reliability, not reasoning quality.
+  const scorableIntelligence = intelligenceResults.filter((r) => !r.infrastructureFailure);
   const intelligenceOverall =
-    intelligenceResults.length > 0
+    scorableIntelligence.length > 0
       ? Math.round(
-          (intelligenceResults.reduce((s, r) => s + r.score, 0) /
-            intelligenceResults.length) *
+          (scorableIntelligence.reduce((s, r) => s + r.score, 0) /
+            scorableIntelligence.length) *
             100
         )
       : 0;
@@ -88,6 +93,16 @@ export function generateReport(
   const behavioralMetrics =
     expectations && intelligenceResults.length > 0
       ? computeBehavioralMetrics(results, expectations)
+      : undefined;
+
+  const infrastructureMetrics =
+    intelligenceResults.length > 0
+      ? computeInfrastructureMetrics(intelligenceResults)
+      : undefined;
+
+  const tokenEconomyMetrics =
+    intelligenceResults.length > 0
+      ? computeTokenEconomyMetrics(intelligenceResults)
       : undefined;
 
   return {
@@ -104,9 +119,181 @@ export function generateReport(
       adversarial: avgLatency(results, "adversarial"),
     },
     behavioralMetrics,
+    infrastructureMetrics,
+    tokenEconomyMetrics,
     failed: results
       .filter((r) => !r.passed)
-      .map((r) => ({ id: r.id, description: r.description, checks: r.checks })),
+      .map((r) => ({
+        id: r.id,
+        description: r.description,
+        checks: r.checks,
+        failureType: r.failureType,
+        infrastructureFailure: r.infrastructureFailure,
+      })),
+  };
+}
+
+function percentile(sortedMs: number[], p: number): number {
+  if (sortedMs.length === 0) return 0;
+  const idx = Math.ceil((p / 100) * sortedMs.length) - 1;
+  return sortedMs[Math.max(0, idx)]!;
+}
+
+function computeInfrastructureMetrics(
+  intelligenceResults: BenchmarkResult[]
+): InfrastructureMetrics {
+  const total = intelligenceResults.length;
+  if (total === 0) {
+    return {
+      apiReliabilityRate: 100,
+      rateLimitHitRate: 0,
+      retryRecoveryRate: 0,
+      avgRetryCount: 0,
+      p95LatencyMs: 0,
+    };
+  }
+
+  const infraFailed = intelligenceResults.filter((r) => r.infrastructureFailure);
+  const rateLimited = intelligenceResults.filter(
+    (r) => r.failureType === "rate_limit_failure"
+  );
+  const retried = intelligenceResults.filter((r) => (r.retryCount ?? 0) > 0);
+  const recovered = retried.filter((r) => r.passed);
+
+  const totalRetries = intelligenceResults.reduce(
+    (s, r) => s + (r.retryCount ?? 0),
+    0
+  );
+
+  const latencies = intelligenceResults
+    .map((r) => r.latencyMs)
+    .filter((ms) => ms > 0)
+    .sort((a, b) => a - b);
+
+  return {
+    apiReliabilityRate: Math.round(((total - infraFailed.length) / total) * 100),
+    rateLimitHitRate: Math.round((rateLimited.length / total) * 100),
+    retryRecoveryRate:
+      retried.length > 0
+        ? Math.round((recovered.length / retried.length) * 100)
+        : 100,
+    avgRetryCount: Math.round((totalRetries / total) * 10) / 10,
+    p95LatencyMs: percentile(latencies, 95),
+  };
+}
+
+function computeTokenEconomyMetrics(
+  intelligenceResults: BenchmarkResult[]
+): TokenEconomyMetrics {
+  const withTokens = intelligenceResults.filter((r) => r.tokenUsage != null);
+  const n = withTokens.length;
+
+  // Baseline for planCompressionRatio — update after each major architecture change.
+  const MUTATION_PROMPT_TOKEN_BASELINE = 7300;
+
+  if (n === 0) {
+    return {
+      totalPromptTokens: 0,
+      totalCompletionTokens: 0,
+      totalTokens: 0,
+      avgPromptTokensPerCase: 0,
+      avgCompletionTokensPerCase: 0,
+      estimatedTotalCostUsd: 0,
+      tokensPerMutation: 0,
+      tokensPerRetrievedRoutine: 0,
+      avgPromptTokensRetrieval: 0,
+      avgPromptTokensMutation: 0,
+      retrievalCaseCount: 0,
+      mutationCaseCount: 0,
+      plannerTokens: 0,
+      avgPlannerPromptTokens: 0,
+      plannerCaseCount: 0,
+      executorTokens: 0,
+      validationTokens: 0,
+      planCompressionRatio: 0,
+      structuredVsNaturalLanguageRatio: 0,
+      deterministicExecutionCoverage: 0,
+    };
+  }
+
+  const totalPromptTokens = withTokens.reduce(
+    (s, r) => s + (r.tokenUsage!.promptTokens),
+    0
+  );
+  const totalCompletionTokens = withTokens.reduce(
+    (s, r) => s + (r.tokenUsage!.completionTokens),
+    0
+  );
+  const totalTokens = withTokens.reduce(
+    (s, r) => s + (r.tokenUsage!.totalTokens),
+    0
+  );
+  const estimatedTotalCostUsd = withTokens.reduce(
+    (s, r) => s + (r.tokenUsage!.estimatedCostUsd ?? 0),
+    0
+  );
+
+  const totalMutationsApplied = withTokens.reduce(
+    (s, r) => s + r.operationsApplied,
+    0
+  );
+
+  // Per-mode prompt token averages
+  const retrievalCases = withTokens.filter((r) => r.promptMode === "retrieval");
+  const mutationCases = withTokens.filter((r) => r.promptMode === "mutation");
+  const retrievalPromptTotal = retrievalCases.reduce(
+    (s, r) => s + r.tokenUsage!.promptTokens,
+    0
+  );
+  const mutationPromptTotal = mutationCases.reduce(
+    (s, r) => s + r.tokenUsage!.promptTokens,
+    0
+  );
+
+  // Structured planner metrics — cases that have plannerTokenUsage set
+  const plannerCases = intelligenceResults.filter((r) => r.plannerTokenUsage != null);
+  const plannerPromptTotal = plannerCases.reduce(
+    (s, r) => s + r.plannerTokenUsage!.promptTokens,
+    0
+  );
+  const plannerTokensTotal = plannerCases.reduce(
+    (s, r) => s + r.plannerTokenUsage!.totalTokens,
+    0
+  );
+  const avgPlannerPromptTokens =
+    plannerCases.length > 0 ? Math.round(plannerPromptTotal / plannerCases.length) : 0;
+
+  return {
+    totalPromptTokens,
+    totalCompletionTokens,
+    totalTokens,
+    avgPromptTokensPerCase: Math.round(totalPromptTokens / n),
+    avgCompletionTokensPerCase: Math.round(totalCompletionTokens / n),
+    estimatedTotalCostUsd: Math.round(estimatedTotalCostUsd * 10000) / 10000,
+    tokensPerMutation:
+      totalMutationsApplied > 0 ? Math.round(totalTokens / totalMutationsApplied) : 0,
+    tokensPerRetrievedRoutine: 0,
+    avgPromptTokensRetrieval:
+      retrievalCases.length > 0 ? Math.round(retrievalPromptTotal / retrievalCases.length) : 0,
+    avgPromptTokensMutation:
+      mutationCases.length > 0 ? Math.round(mutationPromptTotal / mutationCases.length) : 0,
+    retrievalCaseCount: retrievalCases.length,
+    mutationCaseCount: mutationCases.length,
+    plannerTokens: plannerTokensTotal,
+    avgPlannerPromptTokens,
+    plannerCaseCount: plannerCases.length,
+    executorTokens: 0,
+    validationTokens: 0,
+    planCompressionRatio:
+      avgPlannerPromptTokens > 0
+        ? Math.round((MUTATION_PROMPT_TOKEN_BASELINE / avgPlannerPromptTokens) * 100) / 100
+        : 0,
+    structuredVsNaturalLanguageRatio:
+      n > 0 ? Math.round((plannerCases.length / n) * 100) / 100 : 0,
+    deterministicExecutionCoverage:
+      mutationCases.length > 0
+        ? Math.round((plannerCases.length / mutationCases.length) * 100) / 100
+        : 0,
   };
 }
 
@@ -166,7 +353,74 @@ export function printReport(report: BenchmarkReport, results: BenchmarkResult[])
     line(`  overModificationRate:        ${m.overModificationRate}%`);
     line(`  interpretationAccuracy:      ${m.interpretationAccuracy}%`);
     line(`  ambiguityResolutionQuality:  ${m.ambiguityResolutionQuality}%`);
-    line(`  reasoningConsistency:        ${m.reasoningConsistency}% (reserved)`);
+    line(`  reasoningConsistency:        ${m.reasoningConsistency}%`);
+    line("");
+    line("SAFETY METRICS");
+    line("--------------");
+    line(`  gateInterceptionRate:        ${m.gateInterceptionRate}%`);
+    line(`  ambiguityRecognitionRate:    ${m.ambiguityRecognitionRate}%`);
+    line(`  unsafeMutationRate:          ${m.unsafeMutationRate}%`);
+    line(`  overconfidentPlanningRate:   ${m.overconfidentPlanningRate}%`);
+    line("");
+    line("SEVERITY GOVERNANCE");
+    line("-------------------");
+    line(`  severityGateInterceptionRate: ${m.severityGateInterceptionRate}%`);
+    line(`  highRiskAutoMutationRate:     ${m.highRiskAutoMutationRate}%`);
+    line(`  scheduleDisruptionScore:      ${m.scheduleDisruptionScore}`);
+  }
+
+  if (report.infrastructureMetrics) {
+    const im = report.infrastructureMetrics;
+    line("");
+    line("INFRASTRUCTURE METRICS");
+    line("----------------------");
+    line(`  apiReliabilityRate:          ${im.apiReliabilityRate}%`);
+    line(`  rateLimitHitRate:            ${im.rateLimitHitRate}%`);
+    line(`  retryRecoveryRate:           ${im.retryRecoveryRate}%`);
+    line(`  avgRetryCount:               ${im.avgRetryCount}`);
+    line(`  p95LatencyMs:                ${im.p95LatencyMs}ms`);
+  }
+
+  if (report.tokenEconomyMetrics) {
+    const te = report.tokenEconomyMetrics;
+    // Count cases over budget — need intelligence results for this
+    const overBudget = results.filter(
+      (r) =>
+        (r.layer === "behavioral" || r.layer === "adversarial") &&
+        (r.tokenUsage?.promptTokens ?? 0) > 2500
+    ).length;
+    line("");
+    line("TOKEN ECONOMY");
+    line("-------------");
+    line(`  totalTokens:                 ${te.totalTokens}`);
+    line(`  avgPromptTokens/case:        ${te.avgPromptTokensPerCase}`);
+    line(`  avgCompletionTokens/case:    ${te.avgCompletionTokensPerCase}`);
+    line(`  estimatedCost:               $${te.estimatedTotalCostUsd.toFixed(4)}`);
+    line(`  tokensPerMutation:           ${te.tokensPerMutation}`);
+    if (te.retrievalCaseCount > 0 || te.mutationCaseCount > 0) {
+      line(`  By mode:`);
+      line(`    retrieval (${te.retrievalCaseCount} cases):        ${te.avgPromptTokensRetrieval} avg prompt tokens`);
+      line(`    mutation  (${te.mutationCaseCount} cases):         ${te.avgPromptTokensMutation} avg prompt tokens`);
+    }
+    if (overBudget > 0) {
+      line(`  ⚠ tokenBudgetWarnings:       ${overBudget} case${overBudget === 1 ? "" : "s"} over 2500 prompt tokens`);
+    } else {
+      line(`  tokenBudgetWarnings:         0 (all cases within budget)`);
+    }
+
+    if (te.plannerCaseCount > 0) {
+      line("");
+      line("PLANNER ARCHITECTURE");
+      line("--------------------");
+      line(`  plannerCaseCount:             ${te.plannerCaseCount}`);
+      line(`  avgPlannerPromptTokens:       ${te.avgPlannerPromptTokens}`);
+      line(`  plannerTokens:                ${te.plannerTokens}`);
+      line(`  executorTokens:               0 (deterministic)`);
+      line(`  validationTokens:             0 (deterministic)`);
+      line(`  planCompressionRatio:         ${te.planCompressionRatio}x  (vs 7300 baseline)`);
+      line(`  structuredVsNL ratio:         ${Math.round(te.structuredVsNaturalLanguageRatio * 100)}%`);
+      line(`  deterministicExecCoverage:    ${Math.round(te.deterministicExecutionCoverage * 100)}%`);
+    }
   }
 
   if (report.failed.length > 0) {
@@ -174,7 +428,10 @@ export function printReport(report: BenchmarkReport, results: BenchmarkResult[])
     line("FAILED TESTS");
     line("------------");
     for (const f of report.failed) {
-      line(`✗ ${f.id}`);
+      const typeTag = f.failureType
+        ? ` [${f.failureType}${f.infrastructureFailure ? " — infra" : ""}]`
+        : "";
+      line(`✗ ${f.id}${typeTag}`);
       line(`  ${f.description}`);
       for (const c of f.checks.filter((ch) => !ch.passed)) {
         line(`  - ${c.name}${c.detail ? `: ${c.detail}` : ""}`);

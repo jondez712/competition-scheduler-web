@@ -1,6 +1,11 @@
 import type { ScheduledRoutine } from "@/lib/schedule/types";
 import type { ScheduleAssistantOp } from "@/lib/schedule/scheduleAssistantOps";
 import { STAGE_DAY_PAIRS } from "@/lib/benchmark/fixtures";
+/**
+ * Re-exported from assistantFeasibilityGate for benchmark use.
+ * Estimates how many routines a prompt would touch based on scope keywords.
+ */
+export { estimateBlastRadius } from "@/lib/schedule/assistantFeasibilityGate";
 
 const CLARIFICATION_PATTERNS =
   /\?|confirm|clarif|which (day|stage)|do you mean|need (more|to know)|specify|ambiguous|unclear|before i|let me know|would you like/i;

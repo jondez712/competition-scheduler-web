@@ -8,7 +8,10 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { BenchmarkResult, BehavioralExpected } from "@/lib/benchmark/types";
 import { behavioralCases } from "@/lib/benchmark/cases/behavioral";
 import { shouldRunAiBenchmarks } from "@/lib/benchmark/assistantBenchmarkClient";
-import { buildIntelligenceResult } from "@/lib/benchmark/buildIntelligenceResult";
+import {
+  buildIntelligenceResult,
+  buildErrorResult,
+} from "@/lib/benchmark/buildIntelligenceResult";
 import {
   generateReport,
   saveHistory,
@@ -16,21 +19,36 @@ import {
   buildExpectationsMap,
 } from "@/lib/benchmark/runner";
 
-const runAi = shouldRunAiBenchmarks();
+describe("AI Scheduler Benchmark — Behavioral (Layer 2)", () => {
+  const enabled = shouldRunAiBenchmarks();
 
-describe.skipIf(!runAi)("AI Scheduler Benchmark — Behavioral (Layer 2)", () => {
+  if (!enabled) {
+    it.skip(
+      "skipped — run npm run benchmark:ai with OPENAI_API_KEY in .env.local (or AI_BENCHMARK_URL)",
+      () => {},
+    );
+    return;
+  }
+
   const results: BenchmarkResult[] = [];
   const expectations = buildExpectationsMap(
     behavioralCases.map((c) => ({
       id: c.id,
       expected: c.expected as BehavioralExpected,
-    }))
+    })),
   );
 
   beforeAll(async () => {
-    for (const bc of behavioralCases) {
-      const raw = await bc.run();
-      results.push(buildIntelligenceResult(bc, raw));
+    for (let i = 0; i < behavioralCases.length; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 5000));
+      const bc = behavioralCases[i];
+      try {
+        const raw = await bc.run();
+        results.push(buildIntelligenceResult(bc, raw));
+      } catch (err) {
+        console.error(`[benchmark] ${bc.id} failed:`, err instanceof Error ? err.message : err);
+        results.push(buildErrorResult(bc, err));
+      }
     }
   }, 600_000);
 

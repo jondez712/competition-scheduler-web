@@ -26,17 +26,46 @@ export const adversarialCases: BenchmarkCase[] = [
     id: "adversarial-swap-stage2-stage3-preserve-spacing",
     layer: LAYER,
     category: CAT,
-    description: "Impossible: swap stages while preserving teacher spacing",
+    description: "Gate: swap stages while preserving studio cross-stage spacing — gate must clarify",
     expected: {
-      querySourceMustBe: "ai",
-      maxApplied: 4,
-      validEntryIdsOnly: true,
       expectMutation: false,
+      expectGateClarification: true,
       minPassScore: 0.5,
     },
     run: () =>
       runBenchmarkPrompt(
-        "Swap all Stage 2 routines with Stage 3 while preserving teacher spacing."
+        "Swap all Stage 2 routines with Stage 3 while preserving studio cross-stage spacing."
+      ),
+  },
+  {
+    id: "adversarial-vague-balance",
+    layer: LAYER,
+    category: CAT,
+    description: "Gate: vague optimization language — gate must ask for clarification",
+    expected: {
+      expectMutation: false,
+      expectGateClarification: true,
+      minPassScore: 0.5,
+    },
+    run: () =>
+      runBenchmarkPrompt(
+        "Make the schedule feel less stacked across all stages."
+      ),
+  },
+  {
+    id: "adversarial-bulk-swap-no-constraints",
+    layer: LAYER,
+    category: CAT,
+    description: "Severity gate: high blast radius — move all mini solos to Stage 1 on every day",
+    expected: {
+      expectMutation: false,
+      expectGateClarification: true,
+      expectHighRiskGate: true,
+      minPassScore: 0.5,
+    },
+    run: () =>
+      runBenchmarkPrompt(
+        "Move all mini solos to Stage 1 on every day."
       ),
   },
   {

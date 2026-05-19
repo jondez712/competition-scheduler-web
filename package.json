@@ -10,7 +10,7 @@
     "lint": "eslint",
     "test": "vitest run",
     "benchmark": "vitest run src/lib/benchmark/benchmark.system.test.ts --reporter=verbose",
-    "benchmark:ai": "AI_BENCHMARK=1 vitest run src/lib/benchmark/benchmark.behavioral.test.ts src/lib/benchmark/benchmark.adversarial.test.ts --reporter=verbose",
+    "benchmark:ai": "AI_BENCHMARK=1 OPENAI_SCHEDULE_ASSISTANT_MODEL=gpt-4.1 vitest run src/lib/benchmark/benchmark.behavioral.test.ts src/lib/benchmark/benchmark.adversarial.test.ts --reporter=verbose",
     "benchmark:all": "vitest run src/lib/benchmark/ --reporter=verbose",
     "analyze:clusters": "node scripts/analyze-hitchkick-clusters.mjs"
   },

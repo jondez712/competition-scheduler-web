@@ -1,0 +1,112 @@
+COMPETITION SCHEDULER WEB — CONTEXT SUMMARY (for LLM / ChatGPT)
+================================================================
+Generated for pasting as background context. Stack: Next.js 16, React 19,
+TypeScript, Tailwind 4, Vitest. Repo: competition-scheduler-web (standalone).
+
+WHAT THIS APPLICATION IS
+------------------------
+A staff-facing web app for dance (or similar) competitions. It loads LIVE
+schedule data from Hitchkick (via a server-side API route that uses a proxy
+and/or direct Hitchkick API). It visualizes the published schedule on a
+multi-stage timeline, runs rule-based "schedule checks" (errors, warnings,
+info), and lets staff experiment with order changes client-side.
+
+CRITICAL LIMIT: Nothing in this app writes schedules back to Hitchkick.
+All edits are local/browser state unless the user exports files.
+
+HOW USERS NAVIGATE
+------------------
+- Home (/) lists fixed competitions from src/lib/competitions.ts (ids, names,
+  IANA time zones for display).
+- /competition/[id] loads one event via GET /api/schedule/[competitionId].
+
+PER-COMPETITION FLOW (CompetitionClient)
+----------------------------------------
+After data loads, an entry gate lets the user pick:
+1) "Import" path — work from the Hitchkick-published schedule (timed routines).
+2) "New" path — category/routine breakdown and a day×stage planner wizard
+   (StaffSetupWizardModal) to map categories to days/stages before deeper
+   draft scheduling (see README for build-draft / heuristic vs OpenAI).
+
+IMPORTED SCHEDULE VIEW (main advanced surface)
+----------------------------------------------
+- Shows "Competition schedule": timeline rows grouped by time, stages side
+  by side, aligned with published event order.
+- Filters: by day, by stage, by studio dropdown with modes:
+  • "All" (default studio filter) — full context.
+  • "Show only my studio" — timeline filtered to one studio.
+  • "Highlight my studio" — all routines visible but non-selected studios dimmed.
+- Manual reorder: drag handle (⋮⋮) on cards, pragmatic-drag-and-drop, SAME
+  stage AND same day bucket only (reorderTimelineInsertAtEdge). Pink line shows
+  insertion edge.
+- Gating: timeline drag-and-drop is DISABLED when studio mode is "only" or
+  "highlight"; reorder is only allowed when studio mode is "all". Day/stage
+  filters do NOT block dragging.
+- Auto-optimize: POST /api/schedule/optimize streams progress JSON lines, runs
+  optimizeImportedSchedule() in the schedule library — heuristic search that
+  swaps routine slots to reduce analysis errors (e.g. dancer double-booking,
+  cross-stage overlap / clustering goals). Client applies returned rows.
+- Locked studios: staff can open a modal ("Choose studios to lock") and pick
+  studios that must NOT participate in automated slot swaps. Locking uses
+  trim + case-insensitive keys (src/lib/schedule/studioLock.ts). Locks apply
+  to: (a) the optimizer, (b) applyScheduleAssistantOps when applying AI swap
+  operations. Locks do NOT block manual timeline drag in v1. Optimize request
+  body includes lockedStudios[]; assistant requests can include lockedStudios[]
+  for an extra system instruction so the model avoids futile swap proposals.
+  Lock state lives in CompetitionClient; cleared when competition id or server
+  schedule signature changes (not persisted to localStorage).
+
+SCHEDULE ASSISTANT (sidebar)
+----------------------------
+- Chat-style UI (ScheduleAssistantSidebar) with server route
+  POST /api/schedule/assistant — uses Hitchkick payload + current schedule;
+  can propose structured "operations" applied via applyScheduleAssistantOps
+  (e.g. swap_by_entry_id, swap_by_routine_numbers). Respects locked studios
+  the same as the optimizer.
+- Optional: after optimize, user can send an "explain changes" prompt into the
+  assistant (pendingMessage bridge from CompetitionClient).
+
+ANALYSIS / DOMAIN LOGIC
+----------------------
+- Core package: src/lib/schedule/ — parsing Hitchkick entries, building
+  ScheduledRoutine rows, timeline grouping, analysis (analyzePlannerDraftSchedule
+  / findings: spacing, gaps, dancer overlap, cross-stage issues, etc.), CSV/JSON
+  export helpers, draft scheduling matrix builders (scheduleBuilder.ts), etc.
+- Ported / aligned with concepts from a macOS Swift app per README.
+
+ARCHITECTURE — SERVER ROUTES (representative)
+---------------------------------------------
+- GET /api/schedule/[competitionId] — Hitchkick fetch (proxy first, optional
+  direct + API key).
+- POST /api/schedule/optimize — body: serialized client schedule, timeZone,
+  optional lockedStudios; streams events; returns optimized schedule snapshot.
+- POST /api/schedule/assistant — LLM-assisted edits; lockedStudios in body
+  when set.
+- POST /api/schedule/build-draft — parallel-stage draft from registration
+  pool; heuristic by default; optional OpenAI path when env enabled (README).
+
+CONFIGURATION (high level)
+--------------------------
+See .env.example / README: HITCHKICK_PROXY_BASE, optional HITCHKICK_DIRECT_BASE
++ HITCHKICK_API_KEY, optional OpenAI keys and model vars for draft and
+assistant features. Secrets stay server-only (no NEXT_PUBLIC_ for secrets).
+
+TESTING
+-------
+npm run test — Vitest covers parsing, analysis, timeline swap, optimizer,
+assistant ops, payload pruning, etc. (on the order of ~80+ tests in-repo).
+
+DEPLOYMENT
+----------
+Designed for Netlify (netlify.toml); Node 20. Build: next build.
+
+KNOWN PRODUCT CAVEATS (from in-app / plan docs)
+-----------------------------------------------
+- Locked studios: same-stage manual drag can still indirectly affect neighbor
+  routine numbers via full-bucket renumbering — true slot immutability for
+  locked cards would need a follow-up "partial renumber" policy.
+- Studio locks are session/state only (cleared on refresh / schedule refresh),
+  not localStorage-persisted per competition unless added later.
+
+END OF CONTEXT
+----------------

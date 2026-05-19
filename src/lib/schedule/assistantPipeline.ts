@@ -25,6 +25,21 @@ import {
   SCHEDULE_ASSISTANT_TOOLS,
   toolCallToOpsResult,
 } from "@/lib/schedule/assistantTools";
+import {
+  analyzeFeasibility,
+  formatClarificationReply,
+  formatHighRiskReply,
+} from "@/lib/schedule/assistantFeasibilityGate";
+import {
+  buildPlannerSystemPrompt,
+  buildPlannerUserBlock,
+  callPlannerLLM,
+} from "@/lib/schedule/assistantPlanner";
+import {
+  validatePlan,
+  planToOps,
+  generateReplyFromPlan,
+} from "@/lib/schedule/assistantPlanExecutor";
 import type { ScheduleAssistantOp } from "@/lib/schedule/scheduleAssistantOps";
 
 function env(name: string): string | undefined {
@@ -77,13 +92,62 @@ export type AssistantPipelineInput = {
   activeEntryIds?: string[];
 };
 
+/**
+ * Controls which system prompt variant is sent to OpenAI.
+ * - "retrieval"  — lean prompt without mutation-specific instructions
+ * - "mutation"   — full prompt including same-day constraints, bulk-stage steps, etc.
+ */
+export type PromptMode = "retrieval" | "mutation";
+
+/**
+ * Classify the user query into a prompt mode before building the prompt.
+ * Conservative: any mutation keyword → "mutation" (full context is never harmful).
+ */
+function classifyPromptMode(query: string): PromptMode {
+  const mutationPattern =
+    /\b(swap|exchange|switch|move|reassign|reorder|rearrange|put all|send all|place all)\b/i;
+  return mutationPattern.test(query) ? "mutation" : "retrieval";
+}
+
 export type AssistantPipelineResult = {
   reply: string;
   operations: ScheduleAssistantOp[];
-  querySource: "local" | "ai";
+  querySource: "local" | "ai" | "gate";
   activeFilters: ScheduleQueryFilters;
   filteredEntryIds: string[];
   responseMs: number;
+  /** True when the feasibility gate intercepted before any AI call. */
+  needsClarification?: true;
+  /** True when the gate identified a high blast-radius mass-mutation (not just ambiguity). */
+  highRiskOperation?: true;
+  /** Gate risk score (0–1) when needsClarification or highRiskOperation is true. */
+  riskScore?: number;
+  /** Estimated blast radius when gate intercepted. */
+  blastRadius?: number;
+  /** Number of distinct stageNum × calendarDayKey pairs affected (high_risk_operation only). */
+  affectedStageDayPairs?: number;
+  /** Which prompt variant was used for this AI call (undefined for local/gate results). */
+  promptMode?: PromptMode;
+  /**
+   * Token usage from the structured planner LLM call (mutation mode only).
+   * Undefined for retrieval, local, and gate results.
+   */
+  plannerTokenUsage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    model: string;
+  };
+  /**
+   * Token counts from the OpenAI response (only populated on the non-streaming
+   * path; undefined for local/gate results and streaming calls).
+   */
+  tokenUsage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    model: string;
+  };
 };
 
 export type AssistantPipelineError = {
@@ -467,12 +531,174 @@ async function callOpenAiToolStream(
 }
 
 /**
+ * Non-streaming variant — returns the full JSON response in one HTTP round trip.
+ * Use for benchmarks and tests where SSE is not needed; avoids Node.js stream
+ * truncation issues on large tool-call argument payloads.
+ */
+async function callOpenAiToolNoStream(
+  apiKey: string,
+  model: string,
+  temperature: number | undefined,
+  system: string,
+  userBlock: string
+): Promise<
+  | { ok: true; reply: string; operations: ScheduleAssistantOp[]; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }
+  | { ok: false; error: string; status: number }
+> {
+  let res: Response;
+  try {
+    res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        ...(temperature !== undefined ? { temperature } : {}),
+        tools: SCHEDULE_ASSISTANT_TOOLS,
+        tool_choice: "required",
+        stream: false,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: userBlock },
+        ],
+      }),
+      cache: "no-store",
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Assistant request failed";
+    return { ok: false, error: msg, status: 500 };
+  }
+
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    return { ok: false, error: `OpenAI error: ${res.status} ${t.slice(0, 400)}`, status: 502 };
+  }
+
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return { ok: false, error: "Could not parse OpenAI response JSON", status: 502 };
+  }
+
+  const typedBody = body as {
+    choices?: Array<{ message?: { tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> } }>;
+    usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  };
+  const usage = typedBody.usage;
+
+  const choice = typedBody.choices?.[0];
+  const tc = choice?.message?.tool_calls?.[0];
+  if (!tc?.function?.name || !tc.function.arguments) {
+    return { ok: false, error: "Model did not produce a tool call", status: 502 };
+  }
+
+  let parsedArgs: Record<string, unknown>;
+  try {
+    parsedArgs = JSON.parse(tc.function.arguments) as Record<string, unknown>;
+  } catch {
+    return { ok: false, error: "Could not parse tool call arguments", status: 502 };
+  }
+
+  const { reply, operations } = toolCallToOpsResult(tc.function.name, parsedArgs);
+  return { ok: true, reply, operations, usage };
+}
+
+// ---------------------------------------------------------------------------
+// System prompt builders
+// ---------------------------------------------------------------------------
+
+/**
+ * Lean system prompt for read-only retrieval queries.
+ * Omits: same-day constraint, bulk stage assignment steps, anchor context,
+ * "ids are stable" note, and references to overlap/findings data blocks.
+ * Keeps all rules that matter for accurate read-only answers.
+ */
+function buildRetrievalSystemPrompt(
+  competitionName: string,
+  timeZone: string,
+  filterNote: string,
+  lockedStudiosInstruction: string
+): string {
+  return `You are a dance competition schedule copilot for staff using an in-browser timeline editor.
+
+Context: ${competitionName}. Timezone: ${timeZone}.
+
+You have exactly two tools — always call exactly one per response:
+• schedule_answer — for questions, analysis, information, or anything read-only.
+• schedule_swaps — only for explicit swap/move/reorder requests.
+
+The user message provides:
+1) Calendar days — maps each calendarDayKey (YYYY-MM-DD) to weekday + readable date.
+2) Schedule TSV — scheduleEntryId, routineNumber, studio, calendarDayKey, weekday, stageNum, startLocal, endLocal, lcd (level › division › category), choreographer, aotySegment, title.
+   lcd = level › division › category. choreographer is the credited person (not the studio). aotySegment distinguishes Finals solos from AOTY solos at Nationals.
+3) Hitchkick JSON block (when present) — pruned API data with rosterDancerNames/Ids for dancer Q&A.
+${filterNote}
+
+Domain rules:
+- choreographer vs studio: choreographer is the credited person; studioName is the competing business. Never substitute studio name for choreographer.
+- Cross-stage spacing: "teacher spacing" or "studio spacing" refers to studioName — studios are tracked for cross-stage travel, not choreographers.
+- Overlap: A overlaps B only if A.start < B.end AND B.start < A.end on the SAME calendarDayKey. Back-to-back is NOT overlap.
+- Never invent scheduleEntryIds or routine numbers not present in the TSV.
+- Keep replies concise and plain-text (no markdown code fences).${lockedStudiosInstruction}`;
+}
+
+/**
+ * Full system prompt for mutation/planning queries.
+ * Identical to the original monolithic prompt — no behavior change.
+ */
+function buildMutationSystemPrompt(
+  competitionName: string,
+  timeZone: string,
+  filterNote: string,
+  lockedStudiosInstruction: string
+): string {
+  return `You are a dance competition schedule copilot for staff using an in-browser timeline editor.
+
+Context: ${competitionName}. Timezone: ${timeZone}.
+
+You have exactly two tools — always call exactly one per response:
+• schedule_answer — for questions, analysis, information, clarification, or anything read-only.
+• schedule_swaps — ONLY when the user explicitly asks to swap, exchange, move, or reorder routines. Both routines in every swap MUST share the same calendarDayKey.
+
+The user message provides:
+1) Calendar days — maps each calendarDayKey (YYYY-MM-DD) to weekday + readable date.
+2) Verified same-studio time overlaps — authoritative for "do studios overlap?" questions.
+3) Automated checks — cross-stage travel gaps, group spacing, etc. (not the same as overlap).
+4) Schedule TSV — scheduleEntryId, routineNumber, studio, calendarDayKey, weekday, stageNum, startLocal, endLocal, lcd (level › division › category), choreographer, aotySegment, title.
+   lcd = level › division › category. choreographer is the credited person (not the studio). aotySegment distinguishes Finals solos from AOTY solos at Nationals.
+5) Hitchkick JSON block (when present) — pruned API data with rosterDancerNames/Ids for dancer Q&A.
+${filterNote}
+
+Domain rules:
+- choreographer vs studio: choreographer is the credited person; studioName is the competing business. Never substitute studio name for choreographer.
+- Cross-stage spacing: when a user mentions "teacher spacing", "studio spacing", or travel time between stages, they mean the studioName — the studio owner/director is typically the person who has to physically move between rooms, so cross-stage gap warnings are tracked per studio, not per choreographer.
+- Overlap: A overlaps B only if A.start < B.end AND B.start < A.end on the SAME calendarDayKey. Back-to-back is NOT overlap.
+- Same-day constraint (CRITICAL): every swap MUST have both routines on the same calendarDayKey. Never swap across days.
+- Bulk stage assignment ("start every stage with X", "open every stage with X", etc.):
+  Step 1 — enumerate EVERY unique stageNum × calendarDayKey pair present in the TSV (anchor rows included).
+  Step 2 — for each pair independently: identify (a) the current first-slot routine on that stage+day and (b) the earliest X routine on that SAME stage+day. If no X routine exists on a given pair, skip it and note it in your reply.
+  Step 3 — produce one swap per pair from step 2. Never reuse the same X routine across different stage+day pairs. A complete bulk response MUST include all pairs that have a matching X routine — not just one.
+- Anchor context: the TSV includes the first routine per stage/day as reference even in filtered views.
+- ids are stable — swapping moves time+stage, not the scheduleEntryId.
+- Never invent scheduleEntryIds or routine numbers not present in the TSV.
+- Keep replies concise and plain-text (no markdown code fences).${lockedStudiosInstruction}`;
+}
+
+/**
  * Run the full schedule assistant pipeline (filter → local fast path → OpenAI).
  * Used by benchmarks (no SSE) and by the API route (with optional stream callbacks).
  */
 export async function runAssistantPipeline(
   input: AssistantPipelineInput,
-  options: { apiKey: string; callbacks?: AssistantPipelineCallbacks }
+  options: {
+    apiKey: string;
+    callbacks?: AssistantPipelineCallbacks;
+    /** When false, uses a single non-streaming HTTP call (better for benchmarks/tests). Defaults to true. */
+    stream?: boolean;
+  }
 ): Promise<AssistantPipelineResult | AssistantPipelineError> {
   const messages = input.messages;
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
@@ -549,6 +775,47 @@ export async function runAssistantPipeline(
     };
   }
 
+  // Feasibility gate — deterministic check before any OpenAI call.
+  const gateResult = analyzeFeasibility(lastUserQuery, schedule, mergedFilters);
+  if (gateResult.status === "needs_clarification") {
+    const responseMs = Date.now() - reqStart;
+    console.log(
+      `[assistant] source=gate blastRadius=${gateResult.blastRadius} riskScore=${gateResult.riskScore.toFixed(2)} ms=${responseMs}`
+    );
+    return {
+      reply: formatClarificationReply(gateResult),
+      operations: [],
+      querySource: "gate",
+      needsClarification: true,
+      riskScore: gateResult.riskScore,
+      blastRadius: gateResult.blastRadius,
+      activeFilters: mergedFilters,
+      filteredEntryIds,
+      responseMs,
+    };
+  }
+
+  if (gateResult.status === "high_risk_operation") {
+    const responseMs = Date.now() - reqStart;
+    console.log(
+      `[assistant] source=gate HIGH_RISK affectedRoutines=${gateResult.affectedRoutines} ` +
+        `pairs=${gateResult.affectedStageDayPairs} riskScore=${gateResult.riskScore.toFixed(2)} ms=${responseMs}`
+    );
+    return {
+      reply: formatHighRiskReply(gateResult),
+      operations: [],
+      querySource: "gate",
+      needsClarification: true,
+      highRiskOperation: true,
+      riskScore: gateResult.riskScore,
+      blastRadius: gateResult.blastRadius,
+      affectedStageDayPairs: gateResult.affectedStageDayPairs,
+      activeFilters: mergedFilters,
+      filteredEntryIds,
+      responseMs,
+    };
+  }
+
   const dayLegend = schedule.length ? scheduleDayLegend(schedule, timeZone) : "";
   const tsv = contextRows.length
     ? scheduleTsvForAssistant(contextRows, timeZone)
@@ -602,37 +869,74 @@ export async function runAssistantPipeline(
     ? `\n\nFilter context: the TSV below shows only ${contextRows.length} routines matching the current query filters (${JSON.stringify(mergedFilters)}). The full competition has ${schedule.length} routines. Refer to the "Calendar days" section for all available days.`
     : "";
 
-  const system = `You are a dance competition schedule copilot for staff using an in-browser timeline editor.
+  // Route to the appropriate prompt mode based on query intent.
+  const promptMode = classifyPromptMode(lastUserQuery);
 
-Context: ${competitionName}. Timezone: ${timeZone}.
+  // ---------------------------------------------------------------------------
+  // MUTATION PATH — structured planner + deterministic executor (0 extra AI tokens)
+  // ---------------------------------------------------------------------------
+  if (promptMode === "mutation") {
+    const plannerSystem = buildPlannerSystemPrompt(competitionName, timeZone);
+    const plannerUserBlock = buildPlannerUserBlock(lastUserQuery, tsv);
 
-You have exactly two tools — always call exactly one per response:
-• schedule_answer — for questions, analysis, information, clarification, or anything read-only.
-• schedule_swaps — ONLY when the user explicitly asks to swap, exchange, move, or reorder routines. Both routines in every swap MUST share the same calendarDayKey.
+    const plannerResult = await callPlannerLLM(
+      options.apiKey,
+      model,
+      temperature,
+      plannerSystem,
+      plannerUserBlock
+    );
 
-The user message provides:
-1) Calendar days — maps each calendarDayKey (YYYY-MM-DD) to weekday + readable date.
-2) Verified same-studio time overlaps — authoritative for "do studios overlap?" questions.
-3) Automated checks — cross-stage travel gaps, group spacing, etc. (not the same as overlap).
-4) Schedule TSV — scheduleEntryId, routineNumber, studio, calendarDayKey, weekday, stageNum, startLocal, endLocal, lcd (level › division › category), choreographer, aotySegment, title.
-   lcd = level › division › category. choreographer is the credited person (not the studio). aotySegment distinguishes Finals solos from AOTY solos at Nationals.
-5) Hitchkick JSON block (when present) — pruned API data with rosterDancerNames/Ids for dancer Q&A.
-${filterNote}
+    if (!plannerResult.ok) {
+      return { error: plannerResult.error, status: plannerResult.status };
+    }
 
-Domain rules:
-- choreographer vs studio: choreographer is the credited person; studioName is the competing business. Never substitute studio name for choreographer.
-- Overlap: A overlaps B only if A.start < B.end AND B.start < A.end on the SAME calendarDayKey. Back-to-back is NOT overlap.
-- Same-day constraint (CRITICAL): every swap MUST have both routines on the same calendarDayKey. Never swap across days.
-- Bulk stage assignment ("start every stage with X", "open every stage with X", etc.):
-  Step 1 — enumerate EVERY unique stageNum × calendarDayKey pair present in the TSV (anchor rows included).
-  Step 2 — for each pair independently: identify (a) the current first-slot routine on that stage+day and (b) the earliest X routine on that SAME stage+day. If no X routine exists on a given pair, skip it and note it in your reply.
-  Step 3 — produce one swap per pair from step 2. Never reuse the same X routine across different stage+day pairs. A complete bulk response MUST include all pairs that have a matching X routine — not just one.
-- Anchor context: the TSV includes the first routine per stage/day as reference even in filtered views.
-- ids are stable — swapping moves time+stage, not the scheduleEntryId.
-- Never invent scheduleEntryIds or routine numbers not present in the TSV.
-- Keep replies concise and plain-text (no markdown code fences).${lockedStudiosInstruction}`;
+    const { valid, rejected } = validatePlan(plannerResult.plan, contextRows);
+    const operations = planToOps(valid);
+    const reply = generateReplyFromPlan(plannerResult.plan, valid, rejected);
 
-  const userBlock = `Calendar days (timezone ${timeZone}):\n${dayLegend || "—"}\n\n${overlapVerified}\n${findings ? `\nAutomated checks:\n${findings}\n` : ""}
+    const responseMs = Date.now() - reqStart;
+    console.log(
+      `[assistant] source=ai/planner model=${model} intent=${plannerResult.plan.intent} ` +
+        `riskLevel=${plannerResult.plan.riskLevel} ops=${operations.length} ` +
+        `rejected=${rejected.length} contextRows=${contextRows.length} ms=${responseMs}`
+    );
+
+    const rawUsage = plannerResult.usage;
+    const plannerTokenUsage = rawUsage
+      ? {
+          promptTokens: rawUsage.prompt_tokens,
+          completionTokens: rawUsage.completion_tokens,
+          totalTokens: rawUsage.total_tokens,
+          model,
+        }
+      : undefined;
+
+    return {
+      reply,
+      operations,
+      querySource: "ai",
+      activeFilters: mergedFilters,
+      filteredEntryIds,
+      responseMs,
+      promptMode,
+      plannerTokenUsage,
+      // tokenUsage mirrors plannerTokenUsage so aggregate metrics remain consistent
+      tokenUsage: plannerTokenUsage,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // RETRIEVAL PATH — lean prompt, no overlap/findings blocks
+  // ---------------------------------------------------------------------------
+  const system = buildRetrievalSystemPrompt(
+    competitionName,
+    timeZone,
+    filterNote,
+    lockedStudiosInstruction
+  );
+
+  const userBlock = `Calendar days (timezone ${timeZone}):\n${dayLegend || "—"}
 Filtered schedule TSV (${contextRows.length} of ${schedule.length} total routines${isFiltered ? ` — filters: ${JSON.stringify(mergedFilters)}` : ""}):\n${tsv}${hitchBlock}
 
 Conversation (respond to the latest user request):
@@ -642,14 +946,10 @@ ${messages
   .map((m) => `${m.role}: ${m.content}`)
   .join("\n")}`;
 
-  const aiResult = await callOpenAiToolStream(
-    options.apiKey,
-    model,
-    temperature,
-    system,
-    userBlock,
-    options.callbacks
-  );
+  const useStream = options.stream !== false;
+  const aiResult = useStream
+    ? await callOpenAiToolStream(options.apiKey, model, temperature, system, userBlock, options.callbacks)
+    : await callOpenAiToolNoStream(options.apiKey, model, temperature, system, userBlock);
 
   if (!aiResult.ok) {
     return { error: aiResult.error, status: aiResult.status };
@@ -661,6 +961,19 @@ ${messages
       `total=${schedule.length} ms=${responseMs}`
   );
 
+  const rawUsage =
+    !useStream && "usage" in aiResult
+      ? (aiResult as { usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }).usage
+      : undefined;
+  const tokenUsage = rawUsage
+    ? {
+        promptTokens: rawUsage.prompt_tokens,
+        completionTokens: rawUsage.completion_tokens,
+        totalTokens: rawUsage.total_tokens,
+        model,
+      }
+    : undefined;
+
   return {
     reply: aiResult.reply,
     operations: aiResult.operations,
@@ -668,5 +981,7 @@ ${messages
     activeFilters: mergedFilters,
     filteredEntryIds,
     responseMs,
+    tokenUsage,
+    promptMode,
   };
 }
