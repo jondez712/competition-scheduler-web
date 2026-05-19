@@ -8,49 +8,47 @@ import {
 } from "@/lib/schedule/assistantPayloadPrune";
 import { studioLockKeysFromList } from "@/lib/schedule/studioLock";
 import { applyScheduleAssistantOps, type ScheduleAssistantOp } from "@/lib/schedule/scheduleAssistantOps";
+import type { ScheduleQueryFilters } from "@/lib/schedule/assistantIntentFilter";
 
 type ChatMessage = { role: "user" | "assistant"; content: string };
 
+type AssistantActiveContext = {
+  /** Filters that were active for the prior turn — carried forward to resolve "those"/"them". */
+  filters: ScheduleQueryFilters;
+  /** Entry IDs of the routines the model was working with in the prior turn. */
+  entryIds: string[];
+};
+
 /**
- * Max rows sent per request. Rows are distributed evenly across calendar days so every
- * competition day is visible to the model regardless of event length.
+ * Lean serialisation: 13 fields, no roster arrays. Roster is large and rarely needed for
+ * swap operations; the Hitchkick JSON block handles dancer Q&A. The server defaults missing
+ * rosterDancerNames/Ids to empty arrays so existing deserialization logic is unaffected.
+ * No row cap — the filter engine on the server controls what the model sees.
  */
-const WIRE_SCHEDULE_ROW_LIMIT = 1200;
-
 function serializeForApi(rows: ScheduledRoutine[]) {
-  // Group by calendar day so we can sample proportionally — a naive slice(0, N) only
-  // covers the first 1-2 days of a multi-day event and the model never sees the rest.
-  const byDay = new Map<string, ScheduledRoutine[]>();
-  for (const r of rows) {
-    const arr = byDay.get(r.calendarDayKey) ?? [];
-    arr.push(r);
-    byDay.set(r.calendarDayKey, arr);
-  }
-  const numDays = byDay.size || 1;
-  const perDay = Math.max(50, Math.floor(WIRE_SCHEDULE_ROW_LIMIT / numDays));
-
-  const selected: ScheduledRoutine[] = [];
-  for (const [, dayRows] of byDay) {
-    // Sort by start time so the earliest (first-slot) routines are always included.
-    const sorted = [...dayRows].sort((a, b) => a.start.getTime() - b.start.getTime());
-    selected.push(...sorted.slice(0, perDay));
-  }
-
-  return selected.map((r) => ({
-    ...r,
+  return rows.map((r) => ({
+    scheduleEntryId: r.scheduleEntryId,
+    routineNumber: r.routineNumber,
+    routineTitle: r.routineTitle,
+    choreographer: r.choreographer,
+    stageNum: r.stageNum,
+    calendarDayKey: r.calendarDayKey,
     start: r.start.toISOString(),
     end: r.end.toISOString(),
+    studioName: r.studioName,
+    levelName: r.levelName,
+    divisionName: r.divisionName,
+    categoryName: r.categoryName,
+    aotySegment: r.aotySegment,
   }));
 }
 
 function messageRequestsScheduleEdit(text: string): boolean {
-  const t = text.trim().toLowerCase();
   return /\b(swap|switch|exchange|reorder|trade\s+places|reslot|reschedule|move\s+routine|put\s+routine|flip)\b/i.test(
-    t
+    text.trim()
   );
 }
 
-/** Heuristic: likely informational; paired with messageRequestsScheduleEdit to avoid applying mistaken model ops. */
 function looksLikeScheduleInfoOnly(text: string): boolean {
   const t = text.trim();
   if (!t || messageRequestsScheduleEdit(t)) return false;
@@ -75,13 +73,8 @@ function ellipsize(s: string, max: number): string {
 }
 
 /**
- * Raw Hitchkick page cache can be 20MB+; Netlify and similar hosts reject huge POST bodies.
- * Prune + cap JSON length before send. Server still re-merges for the model context budget.
- */
-/**
- * Cap for hitchkickPayload sent in the request body. The server re-prunes to its own model
- * context budget after receipt — keep the wire cap tight to avoid Netlify 502s from large
- * request bodies (3000+ routine exports can exceed 2 MB otherwise).
+ * Prune + cap the hitchkickPayload sent on the wire. Server still re-prunes to its own
+ * model context budget after receipt. Keep wire cap tight to avoid Netlify 502s.
  */
 const WIRE_HITCHKICK_JSON_MAX_CHARS = 200_000;
 
@@ -128,13 +121,10 @@ function assistantFailureBubble(status: number, err?: string): string {
     return "The assistant is not configured on the server (missing OPENAI_API_KEY). Add it to .env.local and restart.";
   }
   if (/context_length|maximum context|context_length_exceeded/.test(e)) {
-    return "This event is too large for one assistant request right now. Clear the chat above, or lower the assistant JSON size budget in .env.local (see openaiAssistantEnvKeys in the repo — try e.g. 35000) and restart the dev server.";
+    return "This event is too large for one assistant request right now. Clear the chat above and try again.";
   }
   if (status === 401 || /invalid.*api key|incorrect api key/.test(e)) {
     return "OpenAI rejected the API key. Check OPENAI_API_KEY.";
-  }
-  if (status === 500 && (e.length === 0 || e.includes("internal server error"))) {
-    return "The assistant request failed on the server (500). If the schedule is very large, try again after a refresh; on Netlify, huge request bodies are rejected — this app now sends a pruned Hitchkick export. Redeploy if you are on an older build.";
   }
   return "I could not reach the assistant. See the red message below for details.";
 }
@@ -151,19 +141,12 @@ export function ScheduleAssistantSidebar({
   lockedStudios = [],
 }: {
   competitionName: string;
-  /** Passed to the server so it can attach the full Hitchkick JSON (GET /api/schedule/[id] shape). */
   competitionId: number;
-  /** In-memory API payload from the page load; avoids a second Hitchkick fetch per assistant message. */
   hitchkickPayload: unknown;
   timeZone: string;
   schedule: ScheduledRoutine[];
   onScheduleReplace: (next: ScheduledRoutine[]) => void;
-  /** When set, shows a notice instead of the composer (e.g. no API key — server returns 503). */
   disabledReason?: string | null;
-  /**
-   * When set, the sidebar opens and immediately sends this message as a user turn.
-   * The `id` field must change each time to trigger a new send (monotonic counter works well).
-   */
   pendingMessage?: { id: number; text: string } | null;
   lockedStudios?: string[];
 }) {
@@ -172,24 +155,22 @@ export function ScheduleAssistantSidebar({
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
+  /** Active filter context from the most recent assistant response. */
+  const [activeContext, setActiveContext] = useState<AssistantActiveContext | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const canSend = schedule.length > 0 && !loading && !disabledReason;
   const lockedStudioKeys = useMemo(() => studioLockKeysFromList(lockedStudios), [lockedStudios]);
-  // Keep a stable ref to `send` so the pending-message effect always calls the latest closure.
   const sendRef = useRef<(() => Promise<void>) | undefined>(undefined);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, loading]);
 
-  // When a pending message arrives (e.g. from the "Explain changes" button), open the
-  // sidebar and auto-send it as a new user turn.
   useEffect(() => {
     if (!pendingMessage?.text) return;
     setOpen(true);
     setInput(pendingMessage.text);
-    // Defer send one tick so `input` state settles before `send` reads it.
     const t = setTimeout(() => {
       sendRef.current?.();
     }, 0);
@@ -208,11 +189,19 @@ export function ScheduleAssistantSidebar({
     try {
       const payload: Record<string, unknown> = {
         messages: nextTranscript.map((m) => ({ role: m.role, content: m.content })),
+        // Lean serialisation — no roster arrays; full schedule (filter engine caps on server).
         schedule: serializeForApi(schedule),
         timeZone,
         competitionName,
         competitionId,
       };
+
+      // Carry forward active filter context so server can resolve "those"/"them" references.
+      if (activeContext) {
+        payload.activeFilters = activeContext.filters;
+        payload.activeEntryIds = activeContext.entryIds;
+      }
+
       const hkWire = hitchkickPayloadForAssistantWire(hitchkickPayload);
       if (hkWire != null) {
         payload.hitchkickPayload = hkWire;
@@ -220,24 +209,29 @@ export function ScheduleAssistantSidebar({
       if (lockedStudios.length > 0) {
         payload.lockedStudios = lockedStudios;
       }
+
       const bodyStr = JSON.stringify(payload);
       const bodySizeKb = Math.round(bodyStr.length / 1024);
+
       if (process.env.NODE_ENV === "development" || process.env.NEXT_PUBLIC_PUBLISH_PREVIEW === "1") {
-        console.debug(`[assistant] request body: ${bodySizeKb} KB (schedule rows: ${(payload.schedule as unknown[]).length})`);
+        console.debug(
+          `[assistant] request body: ${bodySizeKb} KB (schedule rows: ${schedule.length}, activeEntryIds: ${activeContext?.entryIds.length ?? 0})`
+        );
       }
+
       if (bodySizeKb > 5_000) {
         const msg = `Request body too large (${bodySizeKb} KB > 5 MB limit) — please refresh the page and try again.`;
         setLastError(msg);
         setMessages((m) => [...m, { role: "assistant", content: assistantFailureBubble(413, msg) }]);
         return;
       }
+
       const res = await fetch("/api/schedule/assistant", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: bodyStr,
       });
 
-      // Route now streams SSE — if we got a non-2xx before any SSE data it's a plain JSON error.
       if (!res.ok || !res.body) {
         const rawRes = res.body ? await res.text().catch(() => "") : "";
         let errMsg = `Request failed (${res.status})`;
@@ -245,22 +239,26 @@ export function ScheduleAssistantSidebar({
           const parsed = JSON.parse(rawRes) as { error?: string };
           if (parsed.error) errMsg = parsed.error;
         } catch {
-          // Not JSON (e.g. Netlify HTML error page) — surface the raw text so it's diagnosable.
           const plain = rawRes.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
           if (plain) errMsg = `Request failed (${res.status}): ${plain}`;
         }
         setLastError(errMsg);
-        setMessages((m) => [...m, { role: "assistant", content: assistantFailureBubble(res.status, errMsg) }]);
+        setMessages((m) => [
+          ...m,
+          { role: "assistant", content: assistantFailureBubble(res.status, errMsg) },
+        ]);
         return;
       }
 
-      // Consume the SSE stream; each line is `data: <JSON>\n\n`.
+      // Consume the SSE stream.
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let sseBuffer = "";
       let reply = "";
       let ops: ScheduleAssistantOp[] = [];
       let streamError: string | null = null;
+      let nextActiveFilters: ScheduleQueryFilters | undefined;
+      let nextFilteredEntryIds: string[] | undefined;
 
       outer: while (true) {
         const { done, value } = await reader.read();
@@ -273,39 +271,63 @@ export function ScheduleAssistantSidebar({
           if (!trimmed.startsWith("data: ")) continue;
           try {
             const evt = JSON.parse(trimmed.slice(6)) as {
-              type: string; content?: string; reply?: string;
-              operations?: ScheduleAssistantOp[]; error?: string; raw?: string;
+              type: string;
+              content?: string;
+              reply?: string;
+              operations?: ScheduleAssistantOp[];
+              error?: string;
+              raw?: string;
+              activeFilters?: ScheduleQueryFilters;
+              filteredEntryIds?: string[];
             };
             if (evt.type === "chunk") {
-              // tokens streaming in — nothing to do yet (could show a typing indicator)
+              // Tool-call argument chunks — no visible content to render yet.
             } else if (evt.type === "done") {
               reply = typeof evt.reply === "string" ? evt.reply : "";
               ops = Array.isArray(evt.operations) ? evt.operations : [];
+              nextActiveFilters = evt.activeFilters;
+              nextFilteredEntryIds = evt.filteredEntryIds;
               break outer;
             } else if (evt.type === "error") {
               streamError = evt.error ?? "Unknown assistant error";
               break outer;
             }
-          } catch { /* malformed line */ }
+          } catch {
+            /* malformed SSE line */
+          }
         }
       }
 
       if (streamError) {
         setLastError(streamError);
-        setMessages((m) => [...m, { role: "assistant", content: assistantFailureBubble(200, streamError ?? "") }]);
+        setMessages((m) => [
+          ...m,
+          { role: "assistant", content: assistantFailureBubble(200, streamError ?? "") },
+        ]);
         return;
       }
+
+      // Update active context so the next turn can resolve "those"/"them".
+      if (nextActiveFilters !== undefined && nextFilteredEntryIds !== undefined) {
+        setActiveContext({
+          filters: nextActiveFilters,
+          entryIds: nextFilteredEntryIds,
+        });
+      }
+
       const infoOnly = looksLikeScheduleInfoOnly(text);
       let appliedNote = "";
-      let assistantBody = reply.trim();
+      const assistantBody = reply.trim();
 
       if (ops.length > 0 && infoOnly) {
         appliedNote =
-          "\n\n— Schedule not changed: that sounded like a question, not a request to swap or move routines. Say explicitly which routines to swap if you want edits.";
+          "\n\n— Schedule not changed: that sounded like a question. Say explicitly which routines to swap if you want edits.";
       } else if (ops.length > 0) {
-        const { next, applied, skipped } = applyScheduleAssistantOps(schedule, ops as ScheduleAssistantOp[], {
-          lockedStudioKeys,
-        });
+        const { next, applied, skipped } = applyScheduleAssistantOps(
+          schedule,
+          ops as ScheduleAssistantOp[],
+          { lockedStudioKeys }
+        );
         onScheduleReplace(next);
         if (applied.length) {
           appliedNote = describeAppliedAssistantOps(applied, schedule, timeZone);
@@ -315,12 +337,10 @@ export function ScheduleAssistantSidebar({
         }
       }
 
-      if (!assistantBody && appliedNote) {
-        assistantBody = appliedNote.replace(/^\n+/, "").trim();
-        appliedNote = "";
-      }
-
-      setMessages((m) => [...m, { role: "assistant", content: `${assistantBody}${appliedNote}`.trim() }]);
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", content: `${assistantBody}${appliedNote}`.trim() },
+      ]);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Network error";
       setLastError(msg);
@@ -332,6 +352,7 @@ export function ScheduleAssistantSidebar({
       setLoading(false);
     }
   }, [
+    activeContext,
     canSend,
     competitionId,
     competitionName,
@@ -345,7 +366,6 @@ export function ScheduleAssistantSidebar({
     timeZone,
   ]);
 
-  // Keep ref current so the pending-message effect always calls the latest `send` closure.
   sendRef.current = send;
 
   return (
@@ -385,7 +405,9 @@ export function ScheduleAssistantSidebar({
         <div className="mt-3 flex min-h-0 flex-1 flex-col gap-0">
           <div className="shrink-0 space-y-2 pb-3">
             {schedule.length === 0 ? (
-              <p className="text-xs text-amber-800 dark:text-amber-200">Load a schedule with times to use the assistant.</p>
+              <p className="text-xs text-amber-800 dark:text-amber-200">
+                Load a schedule with times to use the assistant.
+              </p>
             ) : null}
             {disabledReason ? (
               <p className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200">
@@ -394,6 +416,22 @@ export function ScheduleAssistantSidebar({
             ) : null}
             {lastError ? (
               <p className="text-xs text-red-600 dark:text-red-400">{lastError}</p>
+            ) : null}
+            {activeContext && Object.keys(activeContext.filters).some(
+              (k) => (activeContext.filters[k as keyof typeof activeContext.filters] as unknown[] | undefined)?.length
+            ) ? (
+              <p className="flex items-center gap-1 text-[10px] text-zinc-500 dark:text-zinc-400">
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-pink-500" aria-hidden />
+                Filtered context active ({activeContext.entryIds.length} routines)
+                <button
+                  type="button"
+                  className="ml-auto rounded px-1 hover:text-zinc-700 dark:hover:text-zinc-200"
+                  onClick={() => setActiveContext(null)}
+                  title="Clear filter context"
+                >
+                  ✕
+                </button>
+              </p>
             ) : null}
           </div>
 
@@ -405,8 +443,8 @@ export function ScheduleAssistantSidebar({
                     Start a new chat
                   </p>
                   <p className="mt-2 max-w-[220px] text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-                    Ask about this schedule in the box below. Your conversation stays in this panel until you refresh the
-                    page.
+                    Ask about this schedule in the box below. Your conversation stays in this panel
+                    until you refresh the page.
                   </p>
                 </div>
               ) : (

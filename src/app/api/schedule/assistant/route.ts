@@ -9,6 +9,18 @@ import type { ScheduledRoutine } from "@/lib/schedule/types";
 import { intervalsOverlap } from "@/lib/schedule/timeParsing";
 import { defaultAssistantChatModelId } from "@/lib/openaiDefaultModelIds";
 import { openaiAssistantEnvKeys } from "@/lib/openaiAssistantEnvKeys";
+import {
+  applyQueryFilters,
+  buildDayKeyToLabel,
+  hasAnyFilters,
+  mergeFilters,
+  parseQueryFilters,
+  type ScheduleQueryFilters,
+} from "@/lib/schedule/assistantIntentFilter";
+import {
+  SCHEDULE_ASSISTANT_TOOLS,
+  toolCallToOpsResult,
+} from "@/lib/schedule/assistantTools";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -26,17 +38,25 @@ function modelAllowsCustomTemperature(model: string): boolean {
   return true;
 }
 
-function stripCodeFence(text: string): string {
-  let t = text.trim();
-  if (t.startsWith("```")) {
-    t = t.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
-  }
-  return t.trim();
-}
-
-type SerializedRoutine = Omit<ScheduledRoutine, "start" | "end"> & {
+type SerializedRoutine = {
+  scheduleEntryId: string;
+  routineNumber: string;
+  routineTitle: string;
+  choreographer?: string;
+  stageNum: number;
+  calendarDayKey: string;
   start: string;
   end: string;
+  studioName?: string;
+  studioCode?: string;
+  levelName?: string;
+  divisionName?: string;
+  categoryName?: string;
+  aotySegment?: string;
+  clusterIndex?: string;
+  routineId?: string;
+  rosterDancerNames?: string[];
+  rosterDancerIds?: string[];
 };
 
 type ChatMessage = { role: "user" | "assistant" | "system"; content: string };
@@ -46,37 +66,53 @@ type Body = {
   schedule?: SerializedRoutine[];
   timeZone?: string;
   competitionName?: string;
-  /** When set, the server reloads the Hitchkick payload and attaches full JSON for Q&A. */
   competitionId?: number | string;
-  /**
-   * Same shape as GET /api/schedule/[id] `payload` — when provided, skips a second Hitchkick fetch (much faster).
-   */
   hitchkickPayload?: unknown;
-  /** Studio names locked for automated edits — model should not propose swaps involving these studios. */
   lockedStudios?: string[];
+  /** Filters carried forward from the prior turn — used to resolve "those"/"them". */
+  activeFilters?: ScheduleQueryFilters;
+  /** Entry IDs from the prior turn's filtered context — used when no new filters are detected. */
+  activeEntryIds?: string[];
 };
 
 function deserializeSchedule(raw: SerializedRoutine[] | undefined): ScheduledRoutine[] {
   if (!Array.isArray(raw)) return [];
   const out: ScheduledRoutine[] = [];
-  for (const r of raw.slice(0, 1200)) {
+  // No row cap — the filter engine determines what the model sees, not a pre-cap here.
+  for (const r of raw) {
     if (!r || typeof r !== "object") continue;
     const start = new Date(String(r.start));
     const end = new Date(String(r.end));
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) continue;
-    const rosterNames = Array.isArray(r.rosterDancerNames) ? r.rosterDancerNames : [];
-    const rosterIds = Array.isArray(r.rosterDancerIds) ? r.rosterDancerIds : [];
     const choreographer = typeof r.choreographer === "string" ? r.choreographer.trim() : "";
     const aotySegment = typeof r.aotySegment === "string" ? r.aotySegment.trim() : "";
+    // rosterDancerNames/Ids are omitted from the lean wire format; default to empty arrays.
+    const rosterNames = Array.isArray(r.rosterDancerNames)
+      ? r.rosterDancerNames.map(String)
+      : [];
+    const rosterIds = Array.isArray(r.rosterDancerIds)
+      ? r.rosterDancerIds.map(String)
+      : [];
     out.push({
-      ...r,
+      scheduleEntryId: String(r.scheduleEntryId),
+      routineId: String(r.routineId ?? ""),
+      studioName: String(r.studioName ?? ""),
+      studioCode: String(r.studioCode ?? ""),
+      stageNum: Number(r.stageNum) || 0,
+      clusterIndex: String(r.clusterIndex ?? ""),
+      calendarDayKey: String(r.calendarDayKey),
       start,
       end,
+      routineNumber: String(r.routineNumber),
+      routineTitle: String(r.routineTitle ?? ""),
       choreographer,
       aotySegment,
-      rosterDancerNames: rosterNames.map((x) => String(x)),
-      rosterDancerIds: rosterIds.map((x) => String(x)),
-    } as ScheduledRoutine);
+      categoryName: String(r.categoryName ?? ""),
+      divisionName: String(r.divisionName ?? ""),
+      levelName: String(r.levelName ?? ""),
+      rosterDancerNames: rosterNames,
+      rosterDancerIds: rosterIds,
+    });
   }
   return out;
 }
@@ -96,7 +132,9 @@ function weekdayShortForDayKey(dayKey: string, timeZone: string): string {
 }
 
 function scheduleDayLegend(rows: ScheduledRoutine[], timeZone: string): string {
-  const keys = [...new Set(rows.map((r) => r.calendarDayKey))].sort((a, b) => a.localeCompare(b));
+  const keys = [...new Set(rows.map((r) => r.calendarDayKey))].sort((a, b) =>
+    a.localeCompare(b)
+  );
   if (keys.length === 0) return "";
   return keys
     .map((k) => {
@@ -120,10 +158,13 @@ function escCell(s: string, max = 96): string {
   return s.replace(/\t/g, " ").replace(/\r?\n/g, " ").slice(0, max);
 }
 
-/** Compact grid for the model: no roster name list (avoids 2× duplication with JSON); cap row length. */
+/**
+ * Compact TSV for the model. Built from `contextRows` (already filtered) so token
+ * usage reflects only the relevant subset — not the entire schedule.
+ */
 function scheduleTsvForAssistant(rows: ScheduledRoutine[], timeZone: string): string {
   const header =
-    "scheduleEntryId\troutineNumber\tstudio\tcalendarDayKey\tweekday\tstageNum\tstartLocal\tendLocal\tdancerCount\tlcd\tchoreographer\taotySegment\ttitle";
+    "scheduleEntryId\troutineNumber\tstudio\tcalendarDayKey\tweekday\tstageNum\tstartLocal\tendLocal\tlcd\tchoreographer\taotySegment\ttitle";
   const lines: string[] = [];
   const fmt = (d: Date) =>
     new Intl.DateTimeFormat("en-US", {
@@ -134,7 +175,6 @@ function scheduleTsvForAssistant(rows: ScheduledRoutine[], timeZone: string): st
     }).format(d);
 
   for (const r of rows) {
-    const dancers = Array.isArray(r.rosterDancerNames) ? r.rosterDancerNames : [];
     const lcd = [r.levelName, r.divisionName, r.categoryName]
       .map((x) => String(x || "").trim())
       .filter(Boolean)
@@ -149,7 +189,6 @@ function scheduleTsvForAssistant(rows: ScheduledRoutine[], timeZone: string): st
         String(r.stageNum),
         fmt(r.start),
         fmt(r.end),
-        String(dancers.length),
         escCell(lcd, 44),
         escCell(r.choreographer || "", 36),
         escCell(r.aotySegment || "", 24),
@@ -187,10 +226,9 @@ function studioKeyForOverlap(r: ScheduledRoutine): string {
   return r.studioCode.trim();
 }
 
-/** Ground truth for “same studio, overlapping times?” — pairs with intersecting [start,end) on the same calendarDayKey. */
 function verifiedSameStudioTimeOverlapsBlock(rows: ScheduledRoutine[], timeZone: string): string {
   const header =
-    "Verified same-studio time overlaps (same calendarDayKey only; two intervals overlap iff each starts before the other ends — authoritative when the user asks if routines from the same studio overlap in time).";
+    "Verified same-studio time overlaps (same calendarDayKey only; authoritative for overlap yes/no questions).";
   if (!rows.length) return `${header}\n(none — empty schedule)`;
 
   const fmt = (d: Date) =>
@@ -220,7 +258,7 @@ function verifiedSameStudioTimeOverlapsBlock(rows: ScheduledRoutine[], timeZone:
       arr.push(r);
       byDay.set(r.calendarDayKey, arr);
     }
-    for (const [dayKey, dayItems] of byDay) {
+    for (const [, dayItems] of byDay) {
       const sorted = [...dayItems].sort((a, b) => {
         const dt = a.start.getTime() - b.start.getTime();
         if (dt !== 0) return dt;
@@ -232,10 +270,8 @@ function verifiedSameStudioTimeOverlapsBlock(rows: ScheduledRoutine[], timeZone:
           const b = sorted[j]!;
           if (!intervalsOverlap(a.start, a.end, b.start, b.end)) continue;
           const studio = (a.studioName || a.studioCode).trim() || "studio";
-          const ta = escCell(a.routineTitle, 44);
-          const tb = escCell(b.routineTitle, 44);
           lines.push(
-            `- ${dayKey} | ${escCell(studio, 48)} | #${a.routineNumber} "${ta}" stage ${a.stageNum} ${fmt(a.start)}–${fmt(a.end)} intersects #${b.routineNumber} "${tb}" stage ${b.stageNum} ${fmt(b.start)}–${fmt(b.end)}`
+            `- ${a.calendarDayKey} | ${escCell(studio, 48)} | #${a.routineNumber} "${escCell(a.routineTitle, 44)}" stage ${a.stageNum} ${fmt(a.start)}–${fmt(a.end)} intersects #${b.routineNumber} "${escCell(b.routineTitle, 44)}" stage ${b.stageNum} ${fmt(b.start)}–${fmt(b.end)}`
           );
           if (lines.length >= maxLines) break;
         }
@@ -247,7 +283,7 @@ function verifiedSameStudioTimeOverlapsBlock(rows: ScheduledRoutine[], timeZone:
   }
 
   if (lines.length === 0) {
-    return `${header}\nNone. Routines that are only back-to-back or separated in time (e.g. one ends 8:18 AM and the next starts 8:24 AM) do NOT overlap, even on the same stage.`;
+    return `${header}\nNone. Back-to-back or separated routines do NOT overlap, even on the same stage.`;
   }
   const tail = lines.length >= maxLines ? `\n(list truncated at ${maxLines} pairs)` : "";
   return `${header}\n${lines.join("\n")}${tail}`;
@@ -262,10 +298,6 @@ function findingsSummary(rows: ScheduledRoutine[], timeZone: string): string {
     .join("\n");
 }
 
-/**
- * Target max characters for pruned Hitchkick JSON in the user message (leaves room for TSV + system + history).
- * Optional env override: 10000–400000 (key is defined in `openaiAssistantEnvKeys`).
- */
 function assistantJsonCharBudget(): number {
   const raw = env(openaiAssistantEnvKeys.maxJsonChars);
   const n = raw ? Number(raw) : NaN;
@@ -286,16 +318,15 @@ function formatHitchkickJsonBlock(
       ? (pruned as { scheduleEntries: unknown[] }).scheduleEntries.length
       : 0;
     const { json, truncated } = fitJsonToCharBudget(pruned, assistantJsonCharBudget());
-    const head = `Hitchkick schedule data (competition ${competitionId}; ${entryCount} scheduleEntries in export; source=${source}; ${
+    const head = `Hitchkick schedule data (competition ${competitionId}; ${entryCount} scheduleEntries; source=${source}; ${
       truncated ? "truncated to fit model context" : "full export after pruning"
-    }). Structured for Q&A: each entry has id (matches TSV scheduleEntryId), type, number, times, stage, cluster, and for routines parentRoutine with title, studioName (studio/business), choreographer (credited choreographer—person or name string; not the studio), aotySegment when present (solo track: e.g. finals for Finals solos; aoty_female / aoty_male etc. for Artist of the Year at Nationals), level/category/division {name}, rosterDancerNames, rosterDancerIds. Heavy media/admin fields from the live API are stripped.\n`;
+    }). Each entry has id (matches TSV scheduleEntryId), type, number, times, stage, cluster, and for routines parentRoutine with title, studioName, choreographer, aotySegment, level/category/division, rosterDancerNames/Ids.\n`;
     return `\n\n${head}${json}\n`;
   } catch {
     return `\n\nHitchkick API payload: could not serialize (source=${source}).\n`;
   }
 }
 
-/** Full Hitchkick table payload — server refetch when client did not send `hitchkickPayload`. */
 async function hitchkickPayloadBlock(competitionId: number): Promise<string> {
   try {
     const raw = await fetchScheduleForCompetition(competitionId);
@@ -313,7 +344,7 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         error:
-          "Missing OPENAI_API_KEY (server env). Add it in .env.local for dev, or in your host’s environment variables (e.g. Netlify → Environment variables) and redeploy.",
+          "Missing OPENAI_API_KEY (server env). Add it in .env.local for dev, or in your host's environment variables (e.g. Netlify → Environment variables) and redeploy.",
       },
       { status: 503 }
     );
@@ -332,6 +363,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Include at least one user message" }, { status: 400 });
   }
 
+  // Deserialize full schedule — no row cap; the filter engine gates what the model sees.
   const schedule = deserializeSchedule(body.schedule);
   const timeZone =
     body.timeZone?.trim() ||
@@ -343,9 +375,7 @@ export async function POST(request: Request) {
     : [];
   const lockedStudiosInstruction =
     lockedStudiosList.length > 0
-      ? `
-
-Locked studios (automated edits): Staff locked these competing studios — do **not** put any routine from these studios in "operations". The UI rejects swaps that move them: ${lockedStudiosList.join("; ")}.`
+      ? `\n\nLocked studios (staff-locked, must not be moved): ${lockedStudiosList.join("; ")}.`
       : "";
 
   const model = env(openaiAssistantEnvKeys.model) ?? defaultAssistantChatModelId();
@@ -364,33 +394,59 @@ Locked studios (automated edits): Staff locked these competing studios — do **
     }
   }
 
-  // On follow-up turns (prior assistant message exists) skip expensive O(n²) overlap analysis and
-  // automated findings — the model already has that context from the first turn.
+  // -------------------------------------------------------------------------
+  // Filter engine: narrow the schedule to the relevant subset for this query.
+  // The model only sees contextRows — typically 10–80 routines, not 3000+.
+  // -------------------------------------------------------------------------
   const isFollowUp = messages.some((m) => m.role === "assistant");
+  const lastUserQuery = lastUser.content.trim();
+  const dayKeyToLabel = buildDayKeyToLabel(schedule, timeZone);
+  const freshFilters = schedule.length
+    ? parseQueryFilters(lastUserQuery, schedule, dayKeyToLabel)
+    : {};
+  const mergedFilters = mergeFilters(body.activeFilters, freshFilters);
+  const contextRows = schedule.length
+    ? applyQueryFilters(schedule, mergedFilters, body.activeEntryIds)
+    : [];
+  const filteredEntryIds = contextRows.map((r) => r.scheduleEntryId);
+  const isFiltered = hasAnyFilters(mergedFilters);
 
+  // Day legend always reflects the full schedule so the model knows all available days.
   const dayLegend = schedule.length ? scheduleDayLegend(schedule, timeZone) : "";
-  const overlapVerified =
-    schedule.length && !isFollowUp
-      ? (() => {
-          try {
-            return verifiedSameStudioTimeOverlapsBlock(schedule, timeZone);
-          } catch {
-            return "(overlap analysis unavailable)";
-          }
-        })()
-      : "(overlap analysis omitted on follow-up — see first response)";
-  const tsv = schedule.length ? scheduleTsvForAssistant(schedule, timeZone) : "(empty schedule)";
-  const findings =
-    schedule.length && !isFollowUp
-      ? (() => {
-          try {
-            return findingsSummary(schedule, timeZone);
-          } catch {
-            return "(automated checks unavailable)";
-          }
-        })()
-      : "";
 
+  // TSV is built from contextRows only — this is the core token-reduction.
+  const tsv = contextRows.length
+    ? scheduleTsvForAssistant(contextRows, timeZone)
+    : "(empty schedule)";
+
+  // Overlap analysis and findings: skip on follow-ups and filtered queries
+  // (expensive O(n²); context already set in the first turn / narrow filters mean
+  // studio-level overlap isn't meaningful within the filtered subset).
+  const shouldRunHeavyAnalysis = !isFollowUp && !isFiltered && schedule.length > 0;
+
+  const overlapVerified = shouldRunHeavyAnalysis
+    ? (() => {
+        try {
+          return verifiedSameStudioTimeOverlapsBlock(schedule, timeZone);
+        } catch {
+          return "(overlap analysis unavailable)";
+        }
+      })()
+    : isFollowUp
+      ? "(overlap analysis omitted on follow-up)"
+      : "(overlap analysis omitted — filtered view)";
+
+  const findings = shouldRunHeavyAnalysis
+    ? (() => {
+        try {
+          return findingsSummary(schedule, timeZone);
+        } catch {
+          return "(automated checks unavailable)";
+        }
+      })()
+    : "";
+
+  // Hitchkick JSON block (roster/dancer Q&A).
   let hitchBlock = "";
   const rawCid = body.competitionId;
   const cid =
@@ -414,60 +470,53 @@ Locked studios (automated edits): Staff locked these competing studios — do **
     hitchBlock = await hitchkickPayloadBlock(cidInt);
   }
 
+  // -------------------------------------------------------------------------
+  // System prompt (tool-calling version — no JSON shape instruction needed)
+  // -------------------------------------------------------------------------
+  const filterNote = isFiltered
+    ? `\n\nFilter context: the TSV below shows only ${contextRows.length} routines matching the current query filters (${JSON.stringify(mergedFilters)}). The full competition has ${schedule.length} routines. Refer to the "Calendar days" section for all available days.`
+    : "";
+
   const system = `You are a dance competition schedule copilot for staff using an in-browser timeline editor.
 
-Context: ${competitionName}. All local times use timezone: ${timeZone}.
+Context: ${competitionName}. Timezone: ${timeZone}.
 
-The user message includes:
-1) A "Calendar days" section mapping each calendarDayKey (YYYY-MM-DD) to weekday and a readable date — use this when the user says "Saturday", "Friday night", etc.
-2) A **"Verified same-studio time overlaps"** section listing every pair of routines from the same studio on the same day whose time ranges truly intersect, or **None** if there are none. Use this for overlap yes/no questions about studios.
-3) A short **"Automated checks"** list (cross-stage travel gaps, group spacing hints, etc.). These are **not** the same as time overlap: a “short gap” warning does not mean two routines overlap.
-4) A compact TSV of timed routines:
-scheduleEntryId, routineNumber, studio, calendarDayKey, weekday, stageNum, startLocal, endLocal, dancerCount, lcd, choreographer, aotySegment, title.
-lcd = level › division › category (abbrev). **choreographer** is the credited choreographer for that schedule row (from Hitchkick). **aotySegment** is the Hitchkick solo track when present: typically **finals** for Finals solos vs **aoty_**… (e.g. **aoty_female**) for Artist of the Year—use it to distinguish those solo lines at Nationals. Dancer names are not in this TSV — use the Hitchkick JSON block (parentRoutine.rosterDancerNames, first 24; rosterNameCount when more).
+You have exactly two tools — always call exactly one per response:
+• schedule_answer — for questions, analysis, information, clarification, or anything read-only.
+• schedule_swaps — ONLY when the user explicitly asks to swap, exchange, move, or reorder routines. Both routines in every swap MUST share the same calendarDayKey.
 
-5) When present, a "Hitchkick schedule data" section is pruned API JSON: scheduleEntries with parentRoutine (title, studioName, choreographer, aotySegment, level/category/division names, rosterDancerNames/Ids). Entry id matches scheduleEntryId. If _assistantTruncated appears, fewer JSON entries fit — the TSV still lists timed rows (or is truncated last; the UI is authoritative).
+The user message provides:
+1) Calendar days — maps each calendarDayKey (YYYY-MM-DD) to weekday + readable date.
+2) Verified same-studio time overlaps — authoritative for "do studios overlap?" questions.
+3) Automated checks — cross-stage travel gaps, group spacing, etc. (not the same as overlap).
+4) Schedule TSV — scheduleEntryId, routineNumber, studio, calendarDayKey, weekday, stageNum, startLocal, endLocal, lcd (level › division › category), choreographer, aotySegment, title.
+   lcd = level › division › category. choreographer is the credited person (not the studio). aotySegment distinguishes Finals solos from AOTY solos at Nationals.
+5) Hitchkick JSON block (when present) — pruned API data with rosterDancerNames/Ids for dancer Q&A.
+${filterNote}
 
-Choreographer vs studio (critical): **parentRoutine.choreographer** and the TSV **choreographer** column both describe the credited **choreographer** (usually a person’s name) for that routine row — prefer the **TSV choreographer** when answering about a specific **scheduleEntryId** or **routineNumber** slot. **parentRoutine.studioName** / TSV **studio** is the **competing studio / business name**. For **every** wording—“who choreographed”, “who choreographed [title]”, “choreographer for…”, “who made the piece”, etc.—answer with **choreographer** for that row (match by scheduleEntryId, routine number, or title). **Never** answer with the studio name unless the user explicitly asks for the studio or **choreographer** is missing/empty in the data (then say it isn’t listed and optionally mention the studio separately). **Never** guess choreographer from dancer roster names.
-
-When the user asks for a studio's "largest" routine, prefer the row with the highest dancerCount among that studio on the day they mean; if tied, prefer division/category indicating larger formations (Large Group, Line, Production) over Solo, Duet, Trio, or Small Group when those cues exist. You may cross-check dancer lists in the JSON payload. That question is READ-ONLY: answer in "reply" with title, routine number, dancerCount, day, and time; "operations" MUST be [].
-
-To find the chronologically last routine on a calendar day: among rows sharing that calendarDayKey, take the latest startLocal (two stages may each have a "last" slot at the same clock time).
-
-Overlap and conflicts: treat two routines as overlapping in time only if they share the **same calendarDayKey** and their wall-clock intervals **actually intersect**: routine A overlaps B only if A.start < B.end AND B.start < A.end. If one routine ends at or before the other starts (example: first ends 8:18 AM, second starts 8:24 AM), that is **not** an overlap — including when both are on the **same stage**. Do not call spaced or back-to-back same-studio routines "overlapping." The same clock time on different calendar days is also not an overlap.
-
-When the user asks whether any routines **from the same studio** overlap in time, trust the **"Verified same-studio time overlaps"** block in the user message: if it says **None**, answer that there are **no** same-studio time overlaps in this export (you may still mention short travel gaps between stages from automated findings if relevant — that is different from overlap).
-
-Read vs write (critical):
-- Questions and analysis (what/which/how many/who/when/list/describe/tell me/…, including hypothetical "what if" without a firm directive to change the grid): ALWAYS use "operations": []. Answer in "reply" only. Never emit swaps for those.
-- Edits ONLY when the user clearly directs a change: e.g. swap/switch/exchange routines, move routine X relative to Y, reorder, fix by swapping specific numbers. If unsure, use [] and ask in "reply".
-- When "operations" is non-empty, "reply" MUST still briefly say in plain words what will change (which routine numbers or titles and which day) so staff see intent before the UI applies swaps.
-
-Rules:
-- Only propose changes the UI can apply. Valid JSON operations:
-  1) {"op":"swap_by_entry_id","entryIdA":"<scheduleEntryId>","entryIdB":"<scheduleEntryId>"} — swaps time+stage between two routines; they MUST share the same calendarDayKey.
-  2) {"op":"swap_by_routine_numbers","dayKey":"YYYY-MM-DD","routineNumberA":"#","routineNumberB":"#"} — when routine numbers uniquely identify one row each on that day.
-
-- CRITICAL — same-day constraint: both routines in every swap MUST have the same calendarDayKey. NEVER swap a routine from one calendar day with a routine from a different calendar day. In a multi-day competition each stage runs on a specific day; always confirm both routines share the same calendarDayKey before proposing the swap.
-- When a request says "start every stage with X": for EACH stage, find the first routine on that stage on its own day AND find an X routine on THAT SAME day/stage, then swap those two. Do not reuse the same source routine across multiple swaps.
-- Each operation uses the scheduleEntryId as it exists after all previous operations in the list have been applied (ids are stable — the swap only moves times/stages, not ids).
-- Reordering may require several chained swaps; return operations in the order they should be applied.
-- If the user only wants analysis or explanation, use an empty operations array (and a helpful "reply").
-- Prefer swap_by_entry_id when ids are visible in the TSV.
+Domain rules:
+- choreographer vs studio: choreographer is the credited person; studioName is the competing business. Never substitute studio name for choreographer.
+- Overlap: A overlaps B only if A.start < B.end AND B.start < A.end on the SAME calendarDayKey. Back-to-back is NOT overlap.
+- Same-day constraint (CRITICAL): every swap MUST have both routines on the same calendarDayKey. Never swap across days.
+- "Start every stage with X": for EACH stage+day combination separately, find the first slot on that stage that day AND an X routine on THAT SAME stage+day, then swap those two. Do not reuse the same X routine across stages.
+- Anchor context: the TSV includes the first routine per stage/day as reference even in filtered views.
+- ids are stable — swapping moves time+stage, not the scheduleEntryId.
 - Never invent scheduleEntryIds or routine numbers not present in the TSV.
-- Never claim a weekday or date is missing if it appears in the Calendar days section or in calendarDayKey/weekday columns.
-- Keep reply concise and actionable (plain text, no markdown code fences in reply).
-${lockedStudiosInstruction}
+- Keep replies concise and plain-text (no markdown code fences).${lockedStudiosInstruction}`;
 
-You MUST respond with ONLY valid JSON (no prose outside JSON) in this exact shape:
-{"reply":"<string>","operations":[ ... ]}`;
+  const userBlock = `Calendar days (timezone ${timeZone}):\n${dayLegend || "—"}\n\n${overlapVerified}\n${findings ? `\nAutomated checks:\n${findings}\n` : ""}
+Filtered schedule TSV (${contextRows.length} of ${schedule.length} total routines${isFiltered ? ` — filters: ${JSON.stringify(mergedFilters)}` : ""}):\n${tsv}${hitchBlock}
 
-  const userBlock = `Calendar days in this export (timezone ${timeZone}):\n${dayLegend || "—"}\n\n${overlapVerified}\n\nAutomated checks (may be partial):\n${findings || "—"}\n\nCurrent schedule TSV (${schedule.length} rows):\n${tsv}${hitchBlock}\n\nConversation (latest user request should be answered):\n${messages
-    .filter((m) => m.role === "user" || m.role === "assistant")
-    .slice(-2)
-    .map((m) => `${m.role}: ${m.content}`)
-    .join("\n")}`;
+Conversation (respond to the latest user request):
+${messages
+  .filter((m) => m.role === "user" || m.role === "assistant")
+  .slice(-4)
+  .map((m) => `${m.role}: ${m.content}`)
+  .join("\n")}`;
 
+  // -------------------------------------------------------------------------
+  // OpenAI call — tool calling with streaming
+  // -------------------------------------------------------------------------
   const encoder = new TextEncoder();
 
   function sseEvent(data: Record<string, unknown>): Uint8Array {
@@ -485,7 +534,8 @@ You MUST respond with ONLY valid JSON (no prose outside JSON) in this exact shap
       body: JSON.stringify({
         model,
         ...(temperature !== undefined ? { temperature } : {}),
-        response_format: { type: "json_object" },
+        tools: SCHEDULE_ASSISTANT_TOOLS,
+        tool_choice: "required",
         stream: true,
         messages: [
           { role: "system", content: system },
@@ -517,12 +567,19 @@ You MUST respond with ONLY valid JSON (no prose outside JSON) in this exact shap
     async start(controller) {
       const decoder = new TextDecoder();
       let lineBuffer = "";
-      let content = "";
 
-      // Reasoning models (o-series) can think silently for 20–60 s before the first token.
-      // Send an SSE comment every 8 s so Netlify's proxy doesn't see silence and 504.
+      // With tool calling, the model streams tool_call argument fragments instead of content.
+      let toolName = "";
+      let toolArgBuffer = "";
+
+      // Reasoning models can think silently for 20–60 s before the first token.
+      // Send SSE comment heartbeats so Netlify's proxy doesn't see silence and 504.
       const heartbeat = setInterval(() => {
-        try { controller.enqueue(encoder.encode(": heartbeat\n\n")); } catch { /* closed */ }
+        try {
+          controller.enqueue(encoder.encode(": heartbeat\n\n"));
+        } catch {
+          /* controller already closed */
+        }
       }, 8_000);
 
       try {
@@ -541,41 +598,77 @@ You MUST respond with ONLY valid JSON (no prose outside JSON) in this exact shap
             if (payload === "[DONE]") continue;
             try {
               const chunk = JSON.parse(payload) as {
-                choices?: Array<{ delta?: { content?: string } }>;
+                choices?: Array<{
+                  delta?: {
+                    content?: string;
+                    tool_calls?: Array<{
+                      index?: number;
+                      id?: string;
+                      type?: string;
+                      function?: { name?: string; arguments?: string };
+                    }>;
+                  };
+                }>;
               };
-              const delta = chunk.choices?.[0]?.delta?.content;
-              if (delta) {
-                content += delta;
-                // Forward each token immediately — keeps the Netlify connection alive.
-                controller.enqueue(sseEvent({ type: "chunk", content: delta }));
+              const delta = chunk.choices?.[0]?.delta;
+              if (!delta) continue;
+
+              // Regular content (rare with tool_choice:"required", but handle defensively).
+              if (delta.content) {
+                controller.enqueue(sseEvent({ type: "chunk", content: delta.content }));
+              }
+
+              // Tool call streaming: name arrives on the first chunk, arguments accumulate.
+              const tc = delta.tool_calls?.[0];
+              if (tc?.function?.name) {
+                toolName = tc.function.name;
+              }
+              if (tc?.function?.arguments) {
+                toolArgBuffer += tc.function.arguments;
+                // Forward a heartbeat-style chunk so the client knows we're still alive.
+                controller.enqueue(sseEvent({ type: "chunk", content: "" }));
               }
             } catch {
-              // malformed SSE line from OpenAI — skip
+              // Malformed SSE line from OpenAI — skip.
             }
           }
         }
 
-        if (!content) {
-          controller.enqueue(sseEvent({ type: "error", error: "Empty model response" }));
-          controller.close();
-          return;
-        }
-
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(stripCodeFence(content));
-        } catch {
+        if (!toolName && !toolArgBuffer) {
           controller.enqueue(
-            sseEvent({ type: "error", error: "Model did not return valid JSON", raw: content.slice(0, 500) })
+            sseEvent({ type: "error", error: "Model did not produce a tool call" })
           );
           controller.close();
           return;
         }
 
-        const obj = parsed as { reply?: string; operations?: unknown };
-        const reply = typeof obj.reply === "string" ? obj.reply : "Here’s what I found.";
-        const operations = Array.isArray(obj.operations) ? obj.operations : [];
-        controller.enqueue(sseEvent({ type: "done", reply, operations }));
+        let parsedArgs: Record<string, unknown>;
+        try {
+          parsedArgs = JSON.parse(toolArgBuffer || "{}") as Record<string, unknown>;
+        } catch {
+          controller.enqueue(
+            sseEvent({
+              type: "error",
+              error: "Could not parse tool call arguments",
+              raw: toolArgBuffer.slice(0, 500),
+            })
+          );
+          controller.close();
+          return;
+        }
+
+        const { reply, operations } = toolCallToOpsResult(toolName, parsedArgs);
+
+        controller.enqueue(
+          sseEvent({
+            type: "done",
+            reply,
+            operations,
+            // Return active filter context so the client can carry it forward.
+            activeFilters: mergedFilters,
+            filteredEntryIds,
+          })
+        );
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Stream error";
         controller.enqueue(sseEvent({ type: "error", error: msg }));
