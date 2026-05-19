@@ -409,7 +409,7 @@ export async function POST(request: Request) {
   const freshFilters = schedule.length
     ? parseQueryFilters(lastUserQuery, schedule, dayKeyToLabel)
     : {};
-  const mergedFilters = mergeFilters(body.activeFilters, freshFilters);
+  const mergedFilters = mergeFilters(body.activeFilters, freshFilters, lastUserQuery);
   const contextRows = schedule.length
     ? applyQueryFilters(schedule, mergedFilters, body.activeEntryIds)
     : [];
@@ -542,7 +542,10 @@ Domain rules:
 - choreographer vs studio: choreographer is the credited person; studioName is the competing business. Never substitute studio name for choreographer.
 - Overlap: A overlaps B only if A.start < B.end AND B.start < A.end on the SAME calendarDayKey. Back-to-back is NOT overlap.
 - Same-day constraint (CRITICAL): every swap MUST have both routines on the same calendarDayKey. Never swap across days.
-- "Start every stage with X": for EACH stage+day combination separately, find the first slot on that stage that day AND an X routine on THAT SAME stage+day, then swap those two. Do not reuse the same X routine across stages.
+- Bulk stage assignment ("start every stage with X", "open every stage with X", etc.):
+  Step 1 — enumerate EVERY unique stageNum × calendarDayKey pair present in the TSV (anchor rows included).
+  Step 2 — for each pair independently: identify (a) the current first-slot routine on that stage+day and (b) the earliest X routine on that SAME stage+day. If no X routine exists on a given pair, skip it and note it in your reply.
+  Step 3 — produce one swap per pair from step 2. Never reuse the same X routine across different stage+day pairs. A complete bulk response MUST include all pairs that have a matching X routine — not just one.
 - Anchor context: the TSV includes the first routine per stage/day as reference even in filtered views.
 - ids are stable — swapping moves time+stage, not the scheduleEntryId.
 - Never invent scheduleEntryIds or routine numbers not present in the TSV.

@@ -163,6 +163,16 @@ export function ScheduleAssistantSidebar({
   const [activeContext, setActiveContext] = useState<AssistantActiveContext | null>(null);
   /** Running tally of local vs AI responses for the current session. */
   const [stats, setStats] = useState({ local: 0, ai: 0 });
+  /**
+   * Pending bulk operations waiting for user confirmation.
+   * Set when the AI returns >1 operation; cleared on apply or cancel.
+   */
+  const [pendingOps, setPendingOps] = useState<{
+    ops: ScheduleAssistantOp[];
+    reply: string;
+    /** Snapshot of schedule rows at the time ops were proposed (for diff labeling). */
+    snapshotRows: ScheduledRoutine[];
+  } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const canSend = schedule.length > 0 && !loading && !disabledReason;
@@ -331,35 +341,62 @@ export function ScheduleAssistantSidebar({
       }
 
       const infoOnly = looksLikeScheduleInfoOnly(text);
-      let appliedNote = "";
       const assistantBody = reply.trim();
 
       if (ops.length > 0 && infoOnly) {
-        appliedNote =
-          "\n\n— Schedule not changed: that sounded like a question. Say explicitly which routines to swap if you want edits.";
-      } else if (ops.length > 0) {
+        // Sounds like a question — don't apply, just show the reply.
+        setMessages((m) => [
+          ...m,
+          {
+            role: "assistant",
+            content: `${assistantBody}\n\n— Schedule not changed: that sounded like a question. Say explicitly which routines to swap if you want edits.`.trim(),
+            querySource: nextQuerySource,
+          },
+        ]);
+      } else if (ops.length > 1) {
+        // Bulk change (>1 op) — require explicit confirmation before applying.
+        setPendingOps({ ops: ops as ScheduleAssistantOp[], reply: assistantBody, snapshotRows: schedule });
+        setMessages((m) => [
+          ...m,
+          {
+            role: "assistant",
+            content: assistantBody,
+            querySource: nextQuerySource,
+          },
+        ]);
+      } else if (ops.length === 1) {
+        // Single swap — apply immediately.
         const { next, applied, skipped } = applyScheduleAssistantOps(
           schedule,
           ops as ScheduleAssistantOp[],
           { lockedStudioKeys }
         );
         onScheduleReplace(next);
+        let appliedNote = "";
         if (applied.length) {
           appliedNote = describeAppliedAssistantOps(applied, schedule, timeZone);
         }
         if (skipped.length) {
           appliedNote += `\n\n— Could not apply: ${skipped.map((s) => s.reason).join("; ")}`;
         }
+        setMessages((m) => [
+          ...m,
+          {
+            role: "assistant",
+            content: `${assistantBody}${appliedNote}`.trim(),
+            querySource: nextQuerySource,
+          },
+        ]);
+      } else {
+        setMessages((m) => [
+          ...m,
+          {
+            role: "assistant",
+            content: assistantBody,
+            querySource: nextQuerySource,
+          },
+        ]);
       }
-
-      setMessages((m) => [
-        ...m,
-        {
-          role: "assistant",
-          content: `${assistantBody}${appliedNote}`.trim(),
-          querySource: nextQuerySource,
-        },
-      ]);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Network error";
       setLastError(msg);
@@ -505,6 +542,85 @@ export function ScheduleAssistantSidebar({
               )}
             </div>
 
+            {pendingOps ? (
+              <div className="shrink-0 border-t border-amber-200 bg-amber-50/80 p-3 dark:border-amber-700 dark:bg-amber-950/30">
+                <p className="mb-2 text-[11px] font-semibold text-amber-900 dark:text-amber-200">
+                  Planned changes ({pendingOps.ops.length}) — review before applying
+                </p>
+                <div className="mb-3 max-h-32 overflow-y-auto rounded border border-amber-200 bg-white/80 p-1.5 text-[10px] text-zinc-700 dark:border-amber-700 dark:bg-zinc-900/60 dark:text-zinc-300">
+                  {pendingOps.ops.map((op, i) => {
+                    if (op.op !== "swap_by_entry_id") {
+                      return <div key={i} className="py-0.5">{i + 1}. {op.op}</div>;
+                    }
+                    const byId = new Map(pendingOps.snapshotRows.map((r) => [r.scheduleEntryId, r]));
+                    const a = byId.get(op.entryIdA);
+                    const b = byId.get(op.entryIdB);
+                    return (
+                      <div key={i} className="border-b border-amber-100 py-0.5 last:border-0 dark:border-amber-800">
+                        {i + 1}.{" "}
+                        {a ? `#${a.routineNumber} "${a.routineTitle}" (${a.calendarDayKey}, Stage ${a.stageNum})` : op.entryIdA}
+                        {" ↔ "}
+                        {b ? `#${b.routineNumber} "${b.routineTitle}" (${b.calendarDayKey}, Stage ${b.stageNum})` : op.entryIdB}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    className="flex-1 rounded-md bg-pink-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-pink-700 dark:bg-pink-700 dark:hover:bg-pink-600"
+                    onClick={() => {
+                      const { ops, reply, snapshotRows } = pendingOps;
+                      const { next, applied, skipped } = applyScheduleAssistantOps(
+                        schedule,
+                        ops,
+                        { lockedStudioKeys }
+                      );
+                      onScheduleReplace(next);
+                      let note = applied.length
+                        ? describeAppliedAssistantOps(applied, snapshotRows, timeZone)
+                        : "";
+                      if (skipped.length) {
+                        note += `\n\n— Could not apply: ${skipped.map((s) => s.reason).join("; ")}`;
+                      }
+                      setMessages((m) => {
+                        const last = m[m.length - 1];
+                        if (last?.role === "assistant" && last.content === reply) {
+                          return [
+                            ...m.slice(0, -1),
+                            { ...last, content: `${reply}${note ? "\n\n" + note : ""}`.trim() },
+                          ];
+                        }
+                        return [...m, { role: "assistant", content: note.trim() }];
+                      });
+                      setPendingOps(null);
+                    }}
+                  >
+                    Apply {pendingOps.ops.length} change{pendingOps.ops.length !== 1 ? "s" : ""}
+                  </button>
+                  <button
+                    type="button"
+                    className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                    onClick={() => {
+                      setMessages((m) => {
+                        const last = m[m.length - 1];
+                        if (last?.role === "assistant" && last.content === pendingOps.reply) {
+                          return [
+                            ...m.slice(0, -1),
+                            { ...last, content: `${pendingOps.reply}\n\n— Changes cancelled.`.trim() },
+                          ];
+                        }
+                        return [...m, { role: "assistant", content: "— Changes cancelled." }];
+                      });
+                      setPendingOps(null);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
             <div className="shrink-0 border-t border-zinc-200 bg-zinc-50/90 p-3 dark:border-zinc-700 dark:bg-zinc-950/80">
               <div className="flex flex-col gap-2">
                 <textarea
@@ -517,22 +633,24 @@ export function ScheduleAssistantSidebar({
                     }
                   }}
                   rows={2}
-                  disabled={!canSend}
+                  disabled={!canSend || !!pendingOps}
                   placeholder={
-                    loading
-                      ? "Working on it…"
-                      : disabledReason
-                        ? "Waiting…"
-                        : schedule.length === 0
-                          ? "Load a schedule to chat"
-                          : "Message… (⌘/Ctrl+Enter to send)"
+                    pendingOps
+                      ? "Review planned changes above…"
+                      : loading
+                        ? "Working on it…"
+                        : disabledReason
+                          ? "Waiting…"
+                          : schedule.length === 0
+                            ? "Load a schedule to chat"
+                            : "Message… (⌘/Ctrl+Enter to send)"
                   }
                   className="w-full resize-none rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm text-zinc-900 shadow-sm placeholder:text-zinc-400 focus:border-pink-500 focus:outline-none focus:ring-1 focus:ring-pink-500 disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-950 dark:text-zinc-100"
                 />
                 <button
                   type="button"
                   onClick={() => void send()}
-                  disabled={!canSend || !input.trim()}
+                  disabled={!canSend || !input.trim() || !!pendingOps}
                   className="rounded-lg bg-pink-600 px-3 py-2 text-sm font-medium text-white hover:bg-pink-700 disabled:opacity-50 dark:bg-pink-700 dark:hover:bg-pink-600"
                 >
                   {loading ? "Thinking…" : "Send"}

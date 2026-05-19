@@ -14,6 +14,37 @@ export type ScheduleQueryFilters = {
   categoryHints?: string[];
 };
 
+// ---------------------------------------------------------------------------
+// Broad-reset detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Pronouns and referential words that anchor a query to the prior filter context.
+ * If present, the prior filter should be *carried*, not cleared.
+ */
+const CONTEXT_ANCHORS =
+  /\b(those|them|they|that|these|it|same|those same|of those)\b/;
+
+/**
+ * Words that signal the user is asking about the full/general schedule,
+ * not a specific filtered subset.
+ */
+const BROAD_SIGNALS =
+  /\b(all|total|every|overall|entire|routines?|how many|count)\b/;
+
+/**
+ * Returns true when a query is clearly general (no context anchors) and
+ * contains at least one broad-scope signal. Used by mergeFilters to decide
+ * whether to clear carried filter context instead of inheriting it.
+ *
+ * Example: "how many routines are there?" → true (clears Mini filter).
+ * Example: "how many of those are solos?" → false (keeps prior context).
+ */
+export function isBroadResetQuery(query: string): boolean {
+  const q = query.toLowerCase();
+  return !CONTEXT_ANCHORS.test(q) && BROAD_SIGNALS.test(q);
+}
+
 /** Division keywords to detect in the query (order matters — longer first to avoid partial matches). */
 const DIVISION_VOCABULARY = [
   "small group",
@@ -79,15 +110,27 @@ export function hasAnyFilters(f: ScheduleQueryFilters): boolean {
 
 /**
  * Combine carried (prior-turn) filters with freshly parsed filters.
- * Fresh non-empty filters override carried context — the user specified new intent.
- * When fresh is empty, carried context is returned (resolves "those"/"them" references).
+ *
+ * Rules:
+ * - Fresh non-empty filters always override carried context (user stated new intent).
+ * - When fresh is empty and the query is a broad/general question (isBroadResetQuery),
+ *   carried filters are cleared — "how many routines are there?" should NOT inherit
+ *   a prior "Mini" filter.
+ * - When fresh is empty and the query contains context anchors ("those", "them", etc.),
+ *   carried filters are preserved — "how many of those are solos?" inherits prior context.
+ *
+ * @param query - The raw user query string (used for broad-reset detection).
  */
 export function mergeFilters(
   carried: ScheduleQueryFilters | undefined | null,
-  fresh: ScheduleQueryFilters
+  fresh: ScheduleQueryFilters,
+  query = ""
 ): ScheduleQueryFilters {
   if (!carried || !hasAnyFilters(carried)) return fresh;
-  if (!hasAnyFilters(fresh)) return carried;
+  if (!hasAnyFilters(fresh)) {
+    if (isBroadResetQuery(query)) return {}; // broad question → clear carried
+    return carried;                           // contextual follow-up → keep carried
+  }
   return fresh; // new explicit filter overrides carried context
 }
 

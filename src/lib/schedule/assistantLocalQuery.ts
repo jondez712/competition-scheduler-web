@@ -162,6 +162,26 @@ function dayLabel(r: ScheduledRoutine, dayKeyToLabel: Record<string, string>): s
 }
 
 // ---------------------------------------------------------------------------
+// Filter label helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Produce a compact human-readable qualifier from active filters so responses
+ * can say "717 Mini routines" instead of just "717 routines".
+ *
+ * Priority order: level → division → studio → category.
+ * Returns an empty string when no dimension hints are active.
+ */
+function describeActiveFilters(filters: ScheduleQueryFilters): string {
+  const parts: string[] = [];
+  if (filters.levelHints?.length) parts.push(filters.levelHints.join("/"));
+  if (filters.divisionHints?.length) parts.push(filters.divisionHints.join("/"));
+  if (filters.studioHints?.length) parts.push(filters.studioHints.join("/"));
+  if (filters.categoryHints?.length) parts.push(filters.categoryHints.join("/"));
+  return parts.join(", ");
+}
+
+// ---------------------------------------------------------------------------
 // Executor helpers
 // ---------------------------------------------------------------------------
 
@@ -171,9 +191,15 @@ function formatCount(
   dayKeyToLabel: Record<string, string>
 ): string {
   const total = rows.length;
+  const qualifier = describeActiveFilters(filters);
+  const noun = qualifier
+    ? `**${total} ${qualifier} routine${total !== 1 ? "s" : ""}**`
+    : `**${total} routine${total !== 1 ? "s" : ""}**`;
 
   if (total === 0) {
-    return "No routines found matching your criteria.";
+    return qualifier
+      ? `No ${qualifier} routines found matching your criteria.`
+      : "No routines found matching your criteria.";
   }
 
   // If a single stage is filtered, no need for breakdown
@@ -182,7 +208,7 @@ function formatCount(
       filters.dayKeys?.length === 1
         ? ` on ${dayKeyToLabel[filters.dayKeys[0]!] ?? filters.dayKeys[0]}`
         : "";
-    return `There are **${total} routine${total !== 1 ? "s" : ""}** on Stage ${filters.stages[0]}${day}.`;
+    return `There are ${noun} on Stage ${filters.stages[0]}${day}.`;
   }
 
   // Per-stage breakdown when no stage filter
@@ -195,24 +221,28 @@ function formatCount(
       .sort(([a], [b]) => Number(a) - Number(b))
       .map(([stage, count]) => `  • Stage ${stage}: ${count}`)
       .join("\n");
-    const context = filters.dayKeys?.length === 1
-      ? ` on ${dayKeyToLabel[filters.dayKeys[0]!] ?? filters.dayKeys[0]}`
-      : "";
-    return `There are **${total} routine${total !== 1 ? "s" : ""}**${context} across all stages:\n${stageLines}`;
+    const context =
+      filters.dayKeys?.length === 1
+        ? ` on ${dayKeyToLabel[filters.dayKeys[0]!] ?? filters.dayKeys[0]}`
+        : "";
+    return `There are ${noun}${context} across all stages:\n${stageLines}`;
   }
 
-  return `There are **${total} routine${total !== 1 ? "s" : ""}** matching your criteria.`;
+  return `There are ${noun} matching your criteria.`;
 }
 
 function formatFirst(
   rows: ScheduledRoutine[],
   timeZone: string,
-  dayKeyToLabel: Record<string, string>
+  dayKeyToLabel: Record<string, string>,
+  filters: ScheduleQueryFilters = {}
 ): string {
   if (rows.length === 0) return "No routines found matching your criteria.";
   const first = rows.reduce((a, b) => (a.start <= b.start ? a : b));
+  const qualifier = describeActiveFilters(filters);
+  const label = qualifier ? `First ${qualifier} routine` : "First routine";
   return (
-    `**First routine:** ${routineLabel(first, timeZone)}\n` +
+    `**${label}:** ${routineLabel(first, timeZone)}\n` +
     `${stageLabel(first)}, ${dayLabel(first, dayKeyToLabel)}`
   );
 }
@@ -220,12 +250,15 @@ function formatFirst(
 function formatLast(
   rows: ScheduledRoutine[],
   timeZone: string,
-  dayKeyToLabel: Record<string, string>
+  dayKeyToLabel: Record<string, string>,
+  filters: ScheduleQueryFilters = {}
 ): string {
   if (rows.length === 0) return "No routines found matching your criteria.";
   const last = rows.reduce((a, b) => (a.start >= b.start ? a : b));
+  const qualifier = describeActiveFilters(filters);
+  const label = qualifier ? `Last ${qualifier} routine` : "Last routine";
   return (
-    `**Last routine:** ${routineLabel(last, timeZone)}\n` +
+    `**${label}:** ${routineLabel(last, timeZone)}\n` +
     `${stageLabel(last)}, ${dayLabel(last, dayKeyToLabel)}`
   );
 }
@@ -326,7 +359,8 @@ function formatListAll(
   rows: ScheduledRoutine[],
   timeZone: string,
   dayKeyToLabel: Record<string, string>,
-  query: string
+  query: string,
+  filters: ScheduleQueryFilters = {}
 ): string {
   if (rows.length === 0) return "No routines found matching your criteria.";
 
@@ -359,12 +393,16 @@ function formatListAll(
 
   const shown = filtered.slice(0, LIST_ALL_LIMIT);
   const more = filtered.length - shown.length;
+  const qualifier = describeActiveFilters(filters);
+  const header = qualifier
+    ? `Listing ${filtered.length} ${qualifier} routine${filtered.length !== 1 ? "s" : ""}:`
+    : `Listing ${filtered.length} routine${filtered.length !== 1 ? "s" : ""}:`;
 
-  const lines = shown.map((r, i) => {
+  const lines = [header, ...shown.map((r, i) => {
     const day = dayLabel(r, dayKeyToLabel);
     const stage = stageLabel(r);
     return `${i + 1}. ${routineLabel(r, timeZone)} — ${stage}, ${day}`;
-  });
+  })];
 
   if (more > 0) lines.push(`(+ ${more} more)`);
 
@@ -400,9 +438,9 @@ export function executeLocalQuery(
     case "count":
       return formatCount(rows, filters, dayKeyToLabel);
     case "first":
-      return formatFirst(rows, timeZone, dayKeyToLabel);
+      return formatFirst(rows, timeZone, dayKeyToLabel, filters);
     case "last":
-      return formatLast(rows, timeZone, dayKeyToLabel);
+      return formatLast(rows, timeZone, dayKeyToLabel, filters);
     case "stage_end_time":
       return formatStageEndTime(rows, timeZone, dayKeyToLabel);
     case "stage_start_time":
@@ -410,7 +448,7 @@ export function executeLocalQuery(
     case "stage_comparison":
       return formatStageComparison(allRows, intent.stat);
     case "list_all":
-      return formatListAll(rows, timeZone, dayKeyToLabel, query);
+      return formatListAll(rows, timeZone, dayKeyToLabel, query, filters);
     default: {
       const _exhaustive: never = intent;
       return `Unhandled intent: ${JSON.stringify(_exhaustive)}`;
