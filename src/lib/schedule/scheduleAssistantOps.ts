@@ -73,20 +73,28 @@ export function applyScheduleAssistantOps(
       }
       const rowA = next.find((r) => r.scheduleEntryId === a);
       const rowB = next.find((r) => r.scheduleEntryId === b);
-      if (
-        rowA &&
-        rowB &&
-        swapTouchesLockedStudio(rowA, rowB, lockedStudioKeys)
-      ) {
+      if (!rowA) {
+        skipped.push({ op, reason: `Entry id "${a}" not found in current schedule (may have already moved)` });
+        continue;
+      }
+      if (!rowB) {
+        skipped.push({ op, reason: `Entry id "${b}" not found in current schedule (may have already moved)` });
+        continue;
+      }
+      if (rowA.calendarDayKey !== rowB.calendarDayKey) {
+        skipped.push({
+          op,
+          reason: `Swap rejected: routines are on different days (${rowA.calendarDayKey} vs ${rowB.calendarDayKey}) — swaps must stay within the same calendar day`,
+        });
+        continue;
+      }
+      if (swapTouchesLockedStudio(rowA, rowB, lockedStudioKeys)) {
         skipped.push({ op, reason: "Swap skipped: one or both studios are locked for automated edits" });
         continue;
       }
       const swapped = swapRoutineSlotsByEntryId(next, a, b);
       if (!swapped) {
-        skipped.push({
-          op,
-          reason: "Swap rejected (missing ids or different calendar days)",
-        });
+        skipped.push({ op, reason: "Swap rejected (unknown reason — check entry ids and calendar days)" });
         continue;
       }
       next = swapped;

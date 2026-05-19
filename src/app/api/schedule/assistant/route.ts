@@ -428,6 +428,9 @@ Rules:
   1) {"op":"swap_by_entry_id","entryIdA":"<scheduleEntryId>","entryIdB":"<scheduleEntryId>"} — swaps time+stage between two routines; they MUST share the same calendarDayKey.
   2) {"op":"swap_by_routine_numbers","dayKey":"YYYY-MM-DD","routineNumberA":"#","routineNumberB":"#"} — when routine numbers uniquely identify one row each on that day.
 
+- CRITICAL — same-day constraint: both routines in every swap MUST have the same calendarDayKey. NEVER swap a routine from one calendar day with a routine from a different calendar day. In a multi-day competition each stage runs on a specific day; always confirm both routines share the same calendarDayKey before proposing the swap.
+- When a request says "start every stage with X": for EACH stage, find the first routine on that stage on its own day AND find an X routine on THAT SAME day/stage, then swap those two. Do not reuse the same source routine across multiple swaps.
+- Each operation uses the scheduleEntryId as it exists after all previous operations in the list have been applied (ids are stable — the swap only moves times/stages, not ids).
 - Reordering may require several chained swaps; return operations in the order they should be applied.
 - If the user only wants analysis or explanation, use an empty operations array (and a helpful "reply").
 - Prefer swap_by_entry_id when ids are visible in the TSV.
