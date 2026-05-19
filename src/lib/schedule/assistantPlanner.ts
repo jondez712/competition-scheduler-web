@@ -144,8 +144,9 @@ export const SCHEDULE_PLAN_TOOL = [
 // ---------------------------------------------------------------------------
 
 /**
- * Lean planner system prompt (~200 tokens).
- * No verbose domain rules — just role definition and output format instructions.
+ * Lean planner system prompt (~250 tokens).
+ * Instructs infer-first behavior: the planner should NEVER ask the user for
+ * mappings it can derive itself from the TSV.
  */
 export function buildPlannerSystemPrompt(
   competitionName: string,
@@ -153,10 +154,21 @@ export function buildPlannerSystemPrompt(
 ): string {
   return `You are a schedule mutation planner for a dance competition (${competitionName}, timezone ${timeZone}).
 
-Given the user's request and a list of schedule entries, produce a structured plan using the schedule_plan tool.
+Given the user's request and the schedule TSV, produce a structured plan using the schedule_plan tool.
 
-Rules:
-- Only reference scheduleEntryIds that appear in the provided TSV.
+INFER-FIRST PRINCIPLE:
+- Always infer the specific routines from the TSV yourself — never ask the user for IDs or mappings.
+- For bulk patterns (e.g. "start every stage with a Larkin routine", "open each day with a Mini solo"):
+  Step 1 — group rows by (stageNum, calendarDayKey).
+  Step 2 — within each group find the earliest target routine (by startLocal).
+  Step 3 — swap it with the current first-slot routine if not already first.
+  Step 4 — emit one swap per group. State what you inferred in planSummary (e.g. "earliest Larkin per stage/day").
+- For spread/even requests (e.g. "spread out Larkin routines"), determine current distribution
+  and propose the minimum swaps to achieve better spacing. State your distribution assumption.
+- Use planSummary to describe what you inferred and what will change — never ask the user to supply this.
+
+Hard rules:
+- Only reference scheduleEntryIds that appear in the TSV.
 - Every swap MUST have both routines on the same calendarDayKey (YYYY-MM-DD).
 - Do not produce verbose reasoning — output only the structured plan.
 - If no valid swaps are possible, return proposedOperations: [] and explain in planSummary.`;

@@ -167,6 +167,32 @@ function computeAffectedStageDayPairs(
 type DetectorResult = Omit<FeasibilityGateResult & { status: "needs_clarification" }, "status" | "riskScore" | "blastRadius"> | null;
 
 /**
+ * Returns true when the prompt expresses a structurally-actionable bulk pattern
+ * that the planner can infer without additional user input.
+ *
+ * Examples that should NOT trigger vague-optimization clarification:
+ *  - "Start every stage with a Larkin Dance Studio routine" (opener + studio)
+ *  - "Spread out Larkin routines more evenly" when studioHints includes Larkin
+ */
+function isActionableBulkPattern(
+  prompt: string,
+  filters: ScheduleQueryFilters
+): boolean {
+  // "start/open every stage with <studio>" — clear bulk opener intent
+  const bulkOpenerPattern =
+    /\b(start|open|begin)\b.{0,30}\b(every|each|all)\b.{0,30}\bstage\b/i;
+  if (bulkOpenerPattern.test(prompt)) return true;
+
+  // Spread/even out a specific named studio when studio filter was detected
+  const specificStudio = (filters.studioHints?.length ?? 0) > 0;
+  const spreadStudioPattern =
+    /\b(spread|even out|evenly|more evenly|distribute)\b.{0,60}\b(routine|studio)\b/i;
+  if (specificStudio && spreadStudioPattern.test(prompt)) return true;
+
+  return false;
+}
+
+/**
  * Detect "swap/move X while preserving Y" — the preservation clause conflicts
  * with the scope of the mutation.
  */
@@ -205,8 +231,15 @@ function detectContradictoryConstraint(
 /**
  * Detect vague optimization language without a quantifiable target.
  * Only fires when paired with a bulk scope modifier.
+ *
+ * Accepts `filters` so structurally-actionable patterns (e.g. studio-specific
+ * spread, bulk opener requests) can be carved out without requiring clarification.
  */
-function detectVagueOptimization(prompt: string, blastRadius: number): DetectorResult {
+function detectVagueOptimization(
+  prompt: string,
+  blastRadius: number,
+  filters: ScheduleQueryFilters = {}
+): DetectorResult {
   if (blastRadius <= 2) return null;
 
   const vagueTerms =
@@ -214,6 +247,9 @@ function detectVagueOptimization(prompt: string, blastRadius: number): DetectorR
   const bulkScope = /\b(all|every|each|across|stage[s]?|the schedule)\b/i;
 
   if (!vagueTerms.test(prompt) || !bulkScope.test(prompt)) return null;
+
+  // Carve out: structurally actionable bulk patterns — planner can infer these.
+  if (isActionableBulkPattern(prompt, filters)) return null;
 
   const termMatch = vagueTerms.exec(prompt);
   const term = termMatch ? termMatch[0] : "optimize";
@@ -318,7 +354,7 @@ function detectMassStageReassignment(
 export function analyzeFeasibility(
   prompt: string,
   schedule: ScheduledRoutine[],
-  _filters: ScheduleQueryFilters
+  filters: ScheduleQueryFilters
 ): FeasibilityGateResult {
   // Skip gate for very short prompts (simple questions)
   if (prompt.trim().length < 20) return { status: "ok" };
@@ -327,14 +363,14 @@ export function analyzeFeasibility(
   const riskScore = Math.min(1, blastRadius / Math.max(schedule.length, 1));
 
   // Ambiguity / contradiction detectors (ask clarifying questions)
-  const ambiguityDetectors = [
-    detectContradictoryConstraint,
-    detectVagueOptimization,
-    detectBulkCrossStageSwap,
+  // detectVagueOptimization receives filters so it can carve out actionable patterns.
+  const ambiguityHits: DetectorResult[] = [
+    detectContradictoryConstraint(prompt, blastRadius),
+    detectVagueOptimization(prompt, blastRadius, filters),
+    detectBulkCrossStageSwap(prompt, blastRadius),
   ];
 
-  for (const detector of ambiguityDetectors) {
-    const hit = detector(prompt, blastRadius);
+  for (const hit of ambiguityHits) {
     if (hit) {
       return {
         status: "needs_clarification",

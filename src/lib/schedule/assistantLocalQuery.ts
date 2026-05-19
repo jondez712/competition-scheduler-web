@@ -58,7 +58,9 @@ const INTENT_PATTERNS: Array<{
     intent: () => ({ kind: "stage_comparison", stat: "fewest" }),
   },
   {
-    pattern: /\b(list all|show all|show me all|display all|give me all|find all)\b/,
+    // Broad list/show intents — includes "show routines after 9am", "list routines on Stage 2"
+    pattern:
+      /\b(list all|show all|show me all|display all|give me all|find all|show routines?|list routines?|show me routines?)\b/,
     intent: () => ({ kind: "list_all" }),
   },
 ];
@@ -91,7 +93,7 @@ interface TimeWindow {
   beforeMinutes?: number;
 }
 
-function parseTimeWindow(query: string): TimeWindow | null {
+export function parseTimeWindow(query: string): TimeWindow | null {
   const q = query.toLowerCase();
 
   if (/\bmorning\b/.test(q)) return { beforeMinutes: 720 };

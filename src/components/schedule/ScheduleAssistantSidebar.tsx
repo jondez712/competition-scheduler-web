@@ -353,37 +353,14 @@ export function ScheduleAssistantSidebar({
             querySource: nextQuerySource,
           },
         ]);
-      } else if (ops.length > 1) {
-        // Bulk change (>1 op) — require explicit confirmation before applying.
+      } else if (ops.length > 0) {
+        // Any proposed change — show preview card first, require explicit confirmation.
         setPendingOps({ ops: ops as ScheduleAssistantOp[], reply: assistantBody, snapshotRows: schedule });
         setMessages((m) => [
           ...m,
           {
             role: "assistant",
             content: assistantBody,
-            querySource: nextQuerySource,
-          },
-        ]);
-      } else if (ops.length === 1) {
-        // Single swap — apply immediately.
-        const { next, applied, skipped } = applyScheduleAssistantOps(
-          schedule,
-          ops as ScheduleAssistantOp[],
-          { lockedStudioKeys }
-        );
-        onScheduleReplace(next);
-        let appliedNote = "";
-        if (applied.length) {
-          appliedNote = describeAppliedAssistantOps(applied, schedule, timeZone);
-        }
-        if (skipped.length) {
-          appliedNote += `\n\n— Could not apply: ${skipped.map((s) => s.reason).join("; ")}`;
-        }
-        setMessages((m) => [
-          ...m,
-          {
-            role: "assistant",
-            content: `${assistantBody}${appliedNote}`.trim(),
             querySource: nextQuerySource,
           },
         ]);

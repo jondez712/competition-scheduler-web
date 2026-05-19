@@ -61,6 +61,21 @@ const DIVISION_VOCABULARY = [
   "line",
 ] as const;
 
+/**
+ * Normalize common division-word plurals so "solos" → "solo", "duets" → "duet",
+ * "trios" → "trio", "groups" is already in "small group"/"large group".
+ * Applied to the lowercased query before vocabulary matching.
+ */
+function normalizeDivisionPlurals(q: string): string {
+  return q
+    .replace(/\bsolos\b/g, "solo")
+    .replace(/\bduets\b/g, "duet")
+    .replace(/\btrios\b/g, "trio")
+    .replace(/\blines\b/g, "line")
+    .replace(/\bproductions\b/g, "production")
+    .replace(/\bduos\b/g, "duo");
+}
+
 /** Max rows sent to the model from the filtered result (anchors may add a few more). */
 const MAX_FILTER_ROWS = 200;
 
@@ -160,7 +175,8 @@ export function parseQueryFilters(
   schedule: ScheduledRoutine[],
   dayKeyToLabel: Record<string, string>
 ): ScheduleQueryFilters {
-  const q = query.toLowerCase();
+  // Normalize plurals before all matching so "solos" → "solo", "duets" → "duet", etc.
+  const q = normalizeDivisionPlurals(query.toLowerCase());
   const filters: ScheduleQueryFilters = {};
 
   // --- Stage ---

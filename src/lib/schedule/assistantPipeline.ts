@@ -36,9 +36,15 @@ import {
   callPlannerLLM,
 } from "@/lib/schedule/assistantPlanner";
 import {
+  resolveReferencedRows,
+  mergeReferencedRows,
+} from "@/lib/schedule/assistantEntityResolve";
+import {
   validatePlan,
   planToOps,
   generateReplyFromPlan,
+  detectBulkOpenerIntent,
+  buildBulkOpenerOps,
 } from "@/lib/schedule/assistantPlanExecutor";
 import type { ScheduleAssistantOp } from "@/lib/schedule/scheduleAssistantOps";
 
@@ -741,9 +747,15 @@ export async function runAssistantPipeline(
     ? parseQueryFilters(lastUserQuery, schedule, dayKeyToLabel)
     : {};
   const mergedFilters = mergeFilters(input.activeFilters, freshFilters, lastUserQuery);
-  const contextRows = schedule.length
+  const baseContextRows = schedule.length
     ? applyQueryFilters(schedule, mergedFilters, input.activeEntryIds)
     : [];
+  // Ensure rows explicitly referenced by routine number or entry ID in the query
+  // are always present in context, regardless of active filters.
+  const referencedRows = schedule.length
+    ? resolveReferencedRows(lastUserQuery, schedule)
+    : [];
+  const contextRows = mergeReferencedRows(baseContextRows, referencedRows);
   const filteredEntryIds = contextRows.map((r) => r.scheduleEntryId);
   const isFiltered = hasAnyFilters(mergedFilters);
 
@@ -876,6 +888,29 @@ export async function runAssistantPipeline(
   // MUTATION PATH — structured planner + deterministic executor (0 extra AI tokens)
   // ---------------------------------------------------------------------------
   if (promptMode === "mutation") {
+    // ---------------------------------------------------------------------------
+    // Deterministic fast path: "start every stage with <studio>" bulk opener
+    // Bypasses the planner LLM entirely — no tokens used.
+    // ---------------------------------------------------------------------------
+    const studioHints = mergedFilters.studioHints ?? [];
+    const bulkOpenerStudio = detectBulkOpenerIntent(lastUserQuery, studioHints);
+    if (bulkOpenerStudio) {
+      const { ops, summary } = buildBulkOpenerOps(schedule, bulkOpenerStudio);
+      const responseMs = Date.now() - reqStart;
+      console.log(
+        `[assistant] source=deterministic/bulk-opener studio="${bulkOpenerStudio}" ops=${ops.length} ms=${responseMs}`
+      );
+      return {
+        reply: summary,
+        operations: ops,
+        querySource: "local",
+        activeFilters: mergedFilters,
+        filteredEntryIds,
+        responseMs,
+        promptMode,
+      };
+    }
+
     const plannerSystem = buildPlannerSystemPrompt(competitionName, timeZone);
     const plannerUserBlock = buildPlannerUserBlock(lastUserQuery, tsv);
 
