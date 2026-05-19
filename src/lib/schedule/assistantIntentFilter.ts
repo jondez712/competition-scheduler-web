@@ -28,9 +28,13 @@ const CONTEXT_ANCHORS =
 /**
  * Words that signal the user is asking about the full/general schedule,
  * not a specific filtered subset.
+ *
+ * Intentionally excludes "how many" and "count" alone — "how many are there?"
+ * without a subject noun is ambiguous and should continue prior context.
+ * "how many routines are there?" explicitly broadens via "routines".
  */
 const BROAD_SIGNALS =
-  /\b(all|total|every|overall|entire|routines?|how many|count)\b/;
+  /\b(all|total|every|overall|entire|routines?)\b/;
 
 /**
  * Returns true when a query is clearly general (no context anchors) and

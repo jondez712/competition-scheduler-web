@@ -9,6 +9,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
+    "benchmark": "vitest run src/lib/benchmark/benchmark.test.ts --reporter=verbose",
     "analyze:clusters": "node scripts/analyze-hitchkick-clusters.mjs"
   },
   "dependencies": {
