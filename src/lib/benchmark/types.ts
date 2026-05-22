@@ -18,6 +18,10 @@ export type { FailureType } from "@/lib/benchmark/failureClassifier";
 export type { PromptMode } from "@/lib/schedule/assistantPipeline";
 // Re-export StructuredPlan for benchmark assertions.
 export type { StructuredPlan } from "@/lib/schedule/assistantPlanner";
+export type {
+  ShowcaseFulfillmentMetrics,
+  BlockFulfillmentResult,
+} from "@/lib/schedule/assistantGoalModel";
 
 /** Severity level for a mutation operation as assessed by the feasibility gate. */
 export type SeverityLevel = "low" | "medium" | "high";
@@ -97,6 +101,13 @@ export type TokenEconomyMetrics = {
   structuredVsNaturalLanguageRatio: number;
   /** plannerCaseCount / mutationCaseCount — fraction of mutation cases going through executor (0–1) */
   deterministicExecutionCoverage: number;
+
+  /** Mean fulfillmentScore across cases with showcaseFulfillment in extra (0–1) */
+  avgShowcaseFulfillmentScore: number;
+  /** Mean fulfilledBlocks / requestedBlocks across showcase metric cases */
+  avgFulfilledBlocksRatio: number;
+  /** Number of cases that reported showcaseFulfillment metrics */
+  showcaseMetricCaseCount: number;
 };
 
 /**

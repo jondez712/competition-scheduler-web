@@ -9,6 +9,16 @@
 import type { ScheduledRoutine } from "@/lib/schedule/types";
 import type { ScheduleAssistantOp } from "@/lib/schedule/scheduleAssistantOps";
 import type { StructuredPlan, ProposedSwap } from "@/lib/schedule/assistantPlanner";
+import type {
+  SchedulingConstraint,
+  SchedulingGoalRequest,
+  BlockFulfillmentResult,
+} from "@/lib/schedule/assistantGoalModel";
+import { applyScheduleAssistantOps } from "@/lib/schedule/scheduleAssistantOps";
+import {
+  scoreBlockFulfillment,
+  aggregateFulfillmentMetrics,
+} from "@/lib/schedule/assistantShowcaseFulfillment";
 
 export type ValidatedOp = ProposedSwap & {
   /** calendarDayKey shared by both entries (confirmed during validation). */
@@ -30,16 +40,21 @@ export type PlanValidationResult = {
 
 /**
  * Validate each proposed operation in the plan.
- * Checks:
+ *
+ * Checks (in order):
  *  1. Both entry IDs exist in the provided schedule entries.
- *  2. Both entries share the same calendarDayKey (same-day constraint).
+ *  2. Both entries share the same calendarDayKey (always enforced).
+ *  3. Both entries share the same stageNum when constraints.sameStageOnly is true.
+ *  4. Both entries share the same divisionName + categoryName when
+ *     constraints.sameDivisionCategoryOnly is true.
  *
  * Invalid ops are collected in `rejected` rather than throwing — allows
  * partial execution and clear feedback to the user.
  */
 export function validatePlan(
   plan: StructuredPlan,
-  schedule: ScheduledRoutine[]
+  schedule: ScheduledRoutine[],
+  constraints?: SchedulingConstraint
 ): PlanValidationResult {
   const byId = new Map<string, ScheduledRoutine>();
   for (const row of schedule) {
@@ -84,10 +99,97 @@ export function validatePlan(
       continue;
     }
 
+    // Same-stage enforcement
+    if (constraints?.sameStageOnly && a.stageNum !== b.stageNum) {
+      rejected.push({
+        ...op,
+        reason: `Same-stage constraint violated: "${op.entryIdA}" is on Stage ${a.stageNum}, "${op.entryIdB}" is on Stage ${b.stageNum}`,
+      });
+      continue;
+    }
+
+    // Same-division/category enforcement
+    if (constraints?.sameDivisionCategoryOnly) {
+      if (a.divisionName !== b.divisionName) {
+        rejected.push({
+          ...op,
+          reason: `Same-division constraint violated: "${op.entryIdA}" is ${a.divisionName}, "${op.entryIdB}" is ${b.divisionName}`,
+        });
+        continue;
+      }
+      if (a.categoryName !== b.categoryName) {
+        rejected.push({
+          ...op,
+          reason: `Same-category constraint violated: "${op.entryIdA}" is ${a.categoryName}, "${op.entryIdB}" is ${b.categoryName}`,
+        });
+        continue;
+      }
+    }
+
     valid.push({ ...op, calendarDayKey: a.calendarDayKey });
   }
 
   return { valid, rejected };
+}
+
+// ---------------------------------------------------------------------------
+// Simulation
+// ---------------------------------------------------------------------------
+
+export type SimulationResult = {
+  simulatedSchedule: ScheduledRoutine[];
+  blockResults: BlockFulfillmentResult[];
+  metrics?: import("@/lib/schedule/assistantGoalModel").ShowcaseFulfillmentMetrics;
+  /** @deprecated use blockResults */
+  blockOccupancy: Array<{
+    blockLabel: string;
+    occupancy: number;
+    placed: number;
+    total: number;
+  }>;
+  warnings: string[];
+};
+
+/**
+ * Apply ops on a copy of the schedule and score per-block fulfillment.
+ */
+export function simulatePlan(
+  schedule: ScheduledRoutine[],
+  ops: ScheduleAssistantOp[],
+  goals?: SchedulingGoalRequest,
+  timeZone?: string
+): SimulationResult {
+  const { next } = applyScheduleAssistantOps(schedule, ops);
+  const simulatedSchedule = next;
+  const warnings: string[] = [];
+
+  if (!goals || !timeZone) {
+    return { simulatedSchedule, blockResults: [], blockOccupancy: [], warnings };
+  }
+
+  const dayKey = goals.constraints.dayKeys?.[0] ?? goals.timeBlocks[0]?.dayKey;
+  const blockResults = goals.timeBlocks.map((block) =>
+    scoreBlockFulfillment(block, simulatedSchedule, timeZone, dayKey, goals.constraints)
+  );
+
+  const metrics = aggregateFulfillmentMetrics(blockResults);
+
+  for (const b of blockResults) {
+    if (b.status !== "fulfilled" && b.windowSlots > 0 && b.occupancy < 0.5) {
+      warnings.push(
+        `Block "${b.blockLabel}": only ${b.placed}/${b.windowSlots} window slots occupied by matching cohort (${Math.round(b.occupancy * 100)}%).`
+      );
+    }
+  }
+
+  const blockOccupancy = blockResults.map((b) => ({
+    blockLabel: b.blockLabel,
+    occupancy: b.occupancy,
+    placed: b.placed,
+    total: b.windowSlots,
+  }));
+
+  return { simulatedSchedule, blockResults, metrics, blockOccupancy, warnings };
 }
 
 // ---------------------------------------------------------------------------

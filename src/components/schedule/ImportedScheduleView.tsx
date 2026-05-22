@@ -216,6 +216,7 @@ export function ImportedScheduleView({
   interactionLocked = false,
   scheduleUiResetKey = 0,
   sessionToolbar,
+  changedEntryIds,
 }: {
   scheduled: ScheduledRoutine[];
   /** Breaks / awards / other timed Hitchkick rows (built from raw `scheduleEntries`). */
@@ -236,6 +237,8 @@ export function ImportedScheduleView({
   scheduleUiResetKey?: number;
   /** Undo/publish strip — rendered above the filter card when set (import flow). */
   sessionToolbar?: ReactNode;
+  /** Routines moved vs last loaded baseline (unpublished). */
+  changedEntryIds?: ReadonlySet<string>;
 }) {
   const isControlled =
     controlledEdited !== undefined && onEditedScheduledChange !== undefined;
@@ -724,6 +727,7 @@ export function ImportedScheduleView({
             emphasizeStudioName={emphasizeStudio}
             interactive={timelineReorderEnabled}
             onDrop={timelineReorderEnabled ? handleDrop : undefined}
+            changedEntryIds={changedEntryIds}
           />
         </>
       )}

@@ -135,4 +135,49 @@ export const behavioralCases: BenchmarkCase[] = [
         "Move strong crowd routines closer to awards blocks."
       ),
   },
+
+  // Goal-oriented planning behavioral cases
+  {
+    id: "behavioral-goal-showcase-no-clarification",
+    layer: LAYER,
+    category: CAT,
+    description:
+      "Goal-oriented showcase-day prompt must NOT trigger clarification — AI should propose ops",
+    expected: {
+      // Gate must pass; AI should receive the request and not ask "what does rearrange mean?"
+      expectGateClarification: false,
+      expectMutation: true,
+      validEntryIdsOnly: true,
+      minPassScore: 0.6,
+    },
+    run: () =>
+      runBenchmarkPrompt(
+        `For Saturday July 5, rearrange Stage 1 routines.
+Start Stage 1 from 8a–8:30a with Mini routines.
+Then from 9a–10:30a with Larkin Dance Studio routines.
+Do not move routines between stages.
+Only swap within same categories/divisions.`
+      ),
+  },
+
+  {
+    id: "behavioral-goal-showcase-larkin-stage4",
+    layer: LAYER,
+    category: CAT,
+    description:
+      "Full Larkin Stage 4 showcase-day prompt: gate passes, AI proposes ops without asking for IDs",
+    expected: {
+      expectGateClarification: false,
+      expectMutation: true,
+      validEntryIdsOnly: true,
+      minPassScore: 0.5,
+    },
+    run: () =>
+      runBenchmarkPrompt(
+        `For Saturday July 5, rearrange Stage 4. Feature Larkin Dance Studio.
+Start Stage 4 from 8a–8:30a with Junior routines.
+Then Larkin Dance Studio routines from 9a–10:30a.
+Do not move routines between stages.`
+      ),
+  },
 ];

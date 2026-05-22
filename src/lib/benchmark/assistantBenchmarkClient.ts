@@ -228,6 +228,7 @@ async function runViaPipeline(
     extra: {
       activeFilters: result.activeFilters,
       filteredEntryIds: result.filteredEntryIds,
+      showcaseFulfillment: result.showcaseFulfillment,
     },
   };
 }

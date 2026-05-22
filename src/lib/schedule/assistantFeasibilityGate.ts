@@ -166,6 +166,82 @@ function computeAffectedStageDayPairs(
 
 type DetectorResult = Omit<FeasibilityGateResult & { status: "needs_clarification" }, "status" | "riskScore" | "blastRadius"> | null;
 
+// ---------------------------------------------------------------------------
+// Structured scheduling goal detector
+// ---------------------------------------------------------------------------
+
+/**
+ * Score how much actionable structure a prompt carries.
+ *
+ * Signals (each worth 1 point, time ranges worth up to 2):
+ *  - Day scope: specific day name / date / "for Tuesday" type phrase
+ *  - Stage scope: "Stage N"
+ *  - Time structure: parseable time range (e.g. "8a–8:30a", "9am–11:30am")
+ *    — each detected range adds 1, capped at 2
+ *  - Cohort structure: studio name, level, division, AOTY, or count target
+ *  - Explicit constraints: "do not move between stages", "only swap within…"
+ *
+ * A score >= 3 with at least one time range means the prompt is
+ * structurally actionable — no clarification needed.
+ */
+export function scoreStructuredGoalSignals(prompt: string): {
+  score: number;
+  signals: string[];
+  hasTimeRange: boolean;
+} {
+  const q = prompt.toLowerCase();
+  const signals: string[] = [];
+
+  // Signal: day scope
+  const dayNames =
+    /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december)\b/i;
+  const datePattern = /\b(?:jul(?:y)?|aug(?:ust)?|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|jun(?:e)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}\b/i;
+  const specificDayPattern = /\b(for|on)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|july|june|august|january|february|march|april|may|september|october|november|december)\b/i;
+  if (dayNames.test(q) || datePattern.test(prompt) || specificDayPattern.test(q)) {
+    signals.push("day_scope");
+  }
+
+  // Signal: specific stage scope
+  if (/\bstage\s*\d+\b/i.test(prompt)) {
+    signals.push("stage_scope");
+  }
+
+  // Signal: time ranges (e.g. "8a–8:30a", "9am-11:30am", "12:15p–2:15p", "around 3p")
+  // Match: Nhh[:mm][a/p][m] (–|-) Nhh[:mm][a/p][m]
+  const timeRangePattern =
+    /\d{1,2}(?::\d{2})?\s*[ap]\.?m?\.?\s*[–\-]\s*\d{1,2}(?::\d{2})?\s*[ap]\.?m?\.?/gi;
+  const timeRanges = prompt.match(timeRangePattern) ?? [];
+  // Also match "around Np" single anchors that imply a target time
+  const aroundTimePattern = /\baround\s+\d{1,2}(?::\d{2})?\s*[ap]\.?m?\.?/gi;
+  const aroundTimes = prompt.match(aroundTimePattern) ?? [];
+  const totalTimeRanges = timeRanges.length + aroundTimes.length;
+  if (totalTimeRanges > 0) {
+    signals.push("time_structure");
+    if (totalTimeRanges > 1) signals.push("time_structure_multi");
+  }
+
+  // Signal: cohort structure (studio / level / division / AOTY / count target)
+  const aotyPattern = /\baoty\b|\bartist of the year\b/i;
+  const levelPattern = /\b(mini|teen|junior|senior)\b/i;
+  const divisionPattern = /\b(solo|duet|duo|trio|small group|large group|production|line)\b/i;
+  const countPattern = /\b\d{1,3}\s+(mini|teen|junior|senior|aoty|solo|duet|duo|trio|group|routine)\b/i;
+  if (aotyPattern.test(q) || levelPattern.test(q) || divisionPattern.test(q) || countPattern.test(q)) {
+    signals.push("cohort_structure");
+  }
+
+  // Signal: explicit constraints
+  const constraintPattern =
+    /\b(do not|don't|only)\b.{0,50}\b(move|swap|between|within|same|categories?|divisions?|stages?)\b/i;
+  if (constraintPattern.test(q)) {
+    signals.push("explicit_constraints");
+  }
+
+  const hasTimeRange = totalTimeRanges > 0;
+  const score = signals.length;
+
+  return { score, signals, hasTimeRange };
+}
+
 /**
  * Returns true when the prompt expresses a structurally-actionable bulk pattern
  * that the planner can infer without additional user input.
@@ -173,6 +249,7 @@ type DetectorResult = Omit<FeasibilityGateResult & { status: "needs_clarificatio
  * Examples that should NOT trigger vague-optimization clarification:
  *  - "Start every stage with a Larkin Dance Studio routine" (opener + studio)
  *  - "Spread out Larkin routines more evenly" when studioHints includes Larkin
+ *  - Full showcase-day: day + stage + time blocks + cohort + constraints
  */
 function isActionableBulkPattern(
   prompt: string,
@@ -188,6 +265,10 @@ function isActionableBulkPattern(
   const spreadStudioPattern =
     /\b(spread|even out|evenly|more evenly|distribute)\b.{0,60}\b(routine|studio)\b/i;
   if (specificStudio && spreadStudioPattern.test(prompt)) return true;
+
+  // Structured scheduling goal: enough signals that the planner can infer the plan
+  const { score, hasTimeRange } = scoreStructuredGoalSignals(prompt);
+  if (score >= 3 && hasTimeRange) return true;
 
   return false;
 }

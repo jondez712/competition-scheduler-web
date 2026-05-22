@@ -10,6 +10,7 @@ import type {
   BehavioralMetrics,
   InfrastructureMetrics,
   TokenEconomyMetrics,
+  ShowcaseFulfillmentMetrics,
 } from "@/lib/benchmark/types";
 import { computeBehavioralMetrics } from "@/lib/benchmark/behavioralEvaluator";
 
@@ -100,10 +101,11 @@ export function generateReport(
       ? computeInfrastructureMetrics(intelligenceResults)
       : undefined;
 
-  const tokenEconomyMetrics =
+  let tokenEconomyMetrics =
     intelligenceResults.length > 0
       ? computeTokenEconomyMetrics(intelligenceResults)
       : undefined;
+  tokenEconomyMetrics = enrichTokenEconomyWithShowcaseMetrics(tokenEconomyMetrics, results);
 
   return {
     runAt: new Date().toISOString(),
@@ -182,6 +184,60 @@ function computeInfrastructureMetrics(
   };
 }
 
+function enrichTokenEconomyWithShowcaseMetrics(
+  te: TokenEconomyMetrics | undefined,
+  allResults: BenchmarkResult[]
+): TokenEconomyMetrics | undefined {
+  const metricsList = allResults
+    .map((r) => r.extra?.showcaseFulfillment as ShowcaseFulfillmentMetrics | undefined)
+    .filter((m): m is ShowcaseFulfillmentMetrics => m != null);
+
+  if (metricsList.length === 0) return te;
+
+  const avgShowcaseFulfillmentScore =
+    metricsList.reduce((s, m) => s + m.fulfillmentScore, 0) / metricsList.length;
+  const avgFulfilledBlocksRatio =
+    metricsList.reduce(
+      (s, m) =>
+        s +
+        (m.requestedBlocks > 0 ? m.fulfilledBlocks / m.requestedBlocks : 0),
+      0
+    ) / metricsList.length;
+
+  const base: TokenEconomyMetrics = te ?? {
+    totalPromptTokens: 0,
+    totalCompletionTokens: 0,
+    totalTokens: 0,
+    avgPromptTokensPerCase: 0,
+    avgCompletionTokensPerCase: 0,
+    estimatedTotalCostUsd: 0,
+    tokensPerMutation: 0,
+    tokensPerRetrievedRoutine: 0,
+    avgPromptTokensRetrieval: 0,
+    avgPromptTokensMutation: 0,
+    retrievalCaseCount: 0,
+    mutationCaseCount: 0,
+    plannerTokens: 0,
+    avgPlannerPromptTokens: 0,
+    plannerCaseCount: 0,
+    executorTokens: 0,
+    validationTokens: 0,
+    planCompressionRatio: 0,
+    structuredVsNaturalLanguageRatio: 0,
+    deterministicExecutionCoverage: 0,
+    avgShowcaseFulfillmentScore: 0,
+    avgFulfilledBlocksRatio: 0,
+    showcaseMetricCaseCount: 0,
+  };
+
+  return {
+    ...base,
+    avgShowcaseFulfillmentScore: Math.round(avgShowcaseFulfillmentScore * 100) / 100,
+    avgFulfilledBlocksRatio: Math.round(avgFulfilledBlocksRatio * 100) / 100,
+    showcaseMetricCaseCount: metricsList.length,
+  };
+}
+
 function computeTokenEconomyMetrics(
   intelligenceResults: BenchmarkResult[]
 ): TokenEconomyMetrics {
@@ -213,6 +269,9 @@ function computeTokenEconomyMetrics(
       planCompressionRatio: 0,
       structuredVsNaturalLanguageRatio: 0,
       deterministicExecutionCoverage: 0,
+      avgShowcaseFulfillmentScore: 0,
+      avgFulfilledBlocksRatio: 0,
+      showcaseMetricCaseCount: 0,
     };
   }
 
@@ -294,6 +353,9 @@ function computeTokenEconomyMetrics(
       mutationCases.length > 0
         ? Math.round((plannerCases.length / mutationCases.length) * 100) / 100
         : 0,
+    avgShowcaseFulfillmentScore: 0,
+    avgFulfilledBlocksRatio: 0,
+    showcaseMetricCaseCount: 0,
   };
 }
 
@@ -420,6 +482,15 @@ export function printReport(report: BenchmarkReport, results: BenchmarkResult[])
       line(`  planCompressionRatio:         ${te.planCompressionRatio}x  (vs 7300 baseline)`);
       line(`  structuredVsNL ratio:         ${Math.round(te.structuredVsNaturalLanguageRatio * 100)}%`);
       line(`  deterministicExecCoverage:    ${Math.round(te.deterministicExecutionCoverage * 100)}%`);
+    }
+
+    if (te.showcaseMetricCaseCount > 0) {
+      line("");
+      line("SHOWCASE FULFILLMENT");
+      line("------------------");
+      line(`  showcaseMetricCaseCount:      ${te.showcaseMetricCaseCount}`);
+      line(`  avgShowcaseFulfillmentScore:  ${te.avgShowcaseFulfillmentScore}`);
+      line(`  avgFulfilledBlocksRatio:      ${te.avgFulfilledBlocksRatio}`);
     }
   }
 

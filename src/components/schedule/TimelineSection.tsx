@@ -252,12 +252,14 @@ function RoutineCardBody({
   numColor,
   studioColor,
   entryFindings,
+  isUnpublishedChange,
 }: {
   routine: ScheduledRoutine;
   align: "left" | "right";
   numColor: string;
   studioColor: string;
   entryFindings?: ScheduleFinding[];
+  isUnpublishedChange?: boolean;
 }) {
   const trail = categoryTrail(routine);
   const perf = performerLine(routine);
@@ -270,8 +272,19 @@ function RoutineCardBody({
 
   return (
     <>
-      <div className={`font-mono text-sm font-semibold tabular-nums ${numColor}`}>
-        #{routine.routineNumber}
+      <div
+        className={`flex items-center gap-1.5 font-mono text-sm font-semibold tabular-nums ${numColor} ${
+          align === "right" ? "justify-end" : ""
+        }`}
+      >
+        {isUnpublishedChange ? (
+          <span
+            className="inline-block h-2 w-2 shrink-0 rounded-full bg-amber-500 ring-2 ring-amber-200 dark:ring-amber-900/80"
+            title="Unpublished change — not yet published"
+            aria-label="Unpublished change"
+          />
+        ) : null}
+        <span>#{routine.routineNumber}</span>
       </div>
       <div
         className={`break-words text-[15px] font-semibold text-zinc-900 dark:text-zinc-50 ${
@@ -305,6 +318,7 @@ const RoutineCardBodyMemo = memo(RoutineCardBody, (prev, next) => {
   if (prev.numColor !== next.numColor) return false;
   if (prev.studioColor !== next.studioColor) return false;
   if (prev.entryFindings !== next.entryFindings) return false;
+  if (prev.isUnpublishedChange !== next.isUnpublishedChange) return false;
   const a = prev.routine;
   const b = next.routine;
   if (a.scheduleEntryId !== b.scheduleEntryId) return false;
@@ -345,6 +359,7 @@ function TimelineRoutineCard({
   onSelect,
   emphasizeStudioName,
   interactive,
+  isUnpublishedChange,
 }: {
   routine: ScheduledRoutine;
   align: "left" | "right";
@@ -354,6 +369,7 @@ function TimelineRoutineCard({
   onSelect: (id: string | null) => void;
   emphasizeStudioName?: string;
   interactive: boolean;
+  isUnpublishedChange?: boolean;
 }) {
   const { num: numColor, studio: studioColor } = colorsForStage(routine.stageNum);
   const selected = selectedEntryId === routine.scheduleEntryId;
@@ -443,9 +459,14 @@ function TimelineRoutineCard({
         <button
           type="button"
           onClick={() => onSelect(selected ? null : routine.scheduleEntryId)}
+          title={isUnpublishedChange ? "Unpublished change — not yet published" : undefined}
           className={`min-w-0 flex-1 rounded-md px-1 py-0.5 ${
             align === "right" ? "text-right" : "text-left"
-          } ${selected ? "bg-zinc-200/70 dark:bg-zinc-700/50" : ""}`}
+          } ${selected ? "bg-zinc-200/70 dark:bg-zinc-700/50" : ""} ${
+            isUnpublishedChange
+              ? "ring-1 ring-amber-400/70 bg-amber-50/60 dark:ring-amber-500/50 dark:bg-amber-950/25"
+              : ""
+          }`}
         >
           <RoutineCardBodyMemo
             routine={routine}
@@ -453,6 +474,7 @@ function TimelineRoutineCard({
             numColor={numColor}
             studioColor={studioColor}
             entryFindings={entryFindings}
+            isUnpublishedChange={isUnpublishedChange}
           />
         </button>
       </div>
@@ -479,6 +501,7 @@ function StageCell({
   borderRight,
   emphasizeStudioName,
   interactive,
+  changedEntryIds,
 }: {
   routines: ScheduledRoutine[];
   stageNum: number;
@@ -490,6 +513,7 @@ function StageCell({
   borderRight: boolean;
   emphasizeStudioName?: string;
   interactive: boolean;
+  changedEntryIds?: ReadonlySet<string>;
 }) {
   if (routines.length === 0) {
     return (
@@ -524,6 +548,7 @@ function StageCell({
               onSelect={onSelect}
               emphasizeStudioName={emphasizeStudioName}
               interactive={interactive}
+              isUnpublishedChange={changedEntryIds?.has(r.scheduleEntryId)}
             />
           </div>
         ))}
@@ -540,6 +565,7 @@ export function TimelineSection({
   emphasizeStudioName,
   interactive = false,
   onDrop,
+  changedEntryIds,
 }: {
   groups: TimelineGroupModel[];
   findings: ScheduleFinding[];
@@ -553,6 +579,8 @@ export function TimelineSection({
    * `edge` is the closest edge at the moment of drop — "top" = insert before target, "bottom" = insert after.
    */
   onDrop?: (sourceId: string, targetId: string, edge: "top" | "bottom") => void;
+  /** Routines whose slot differs from the last loaded baseline (unpublished moves). */
+  changedEntryIds?: ReadonlySet<string>;
 }) {
   const findingsMap = useMemo(() => indexFindingsByEntryId(findings), [findings]);
   const tz = timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -708,6 +736,7 @@ export function TimelineSection({
                                 borderRight
                                 emphasizeStudioName={emphasizeStudioName}
                                 interactive={!!interactive}
+                                changedEntryIds={changedEntryIds}
                               />
                             )}
                             <td className="min-w-0 border-r border-zinc-200/80 px-1 py-2 text-center font-mono text-[10px] tabular-nums leading-tight text-zinc-600 dark:border-zinc-700/80 dark:text-zinc-400 sm:px-2 sm:text-xs">
@@ -736,6 +765,7 @@ export function TimelineSection({
                                 borderRight={false}
                                 emphasizeStudioName={emphasizeStudioName}
                                 interactive={!!interactive}
+                                changedEntryIds={changedEntryIds}
                               />
                             )}
                           </tr>
@@ -781,6 +811,7 @@ export function TimelineSection({
                                 borderRight={sidx < stages.length - 1}
                                 emphasizeStudioName={emphasizeStudioName}
                                 interactive={!!interactive}
+                                changedEntryIds={changedEntryIds}
                               />
                             );
                           })}

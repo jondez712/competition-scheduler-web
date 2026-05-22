@@ -154,3 +154,54 @@ describe("parseQueryFilters — stage", () => {
     expect(f.stages).toContain(3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Day parsing — multi-day fixture regression
+// ---------------------------------------------------------------------------
+
+describe("parseQueryFilters — day (multi-day schedule)", () => {
+  // Fixture with two days in the same month: Sunday July 5 and Tuesday July 7.
+  // The old bug: "July" matched BOTH days; the correct behaviour is to match
+  // only the day whose weekday name or full "Month Day" pair appears in the query.
+  const multiDaySchedule: ScheduledRoutine[] = [
+    row({ scheduleEntryId: "d1", calendarDayKey: "2026-07-05", stageNum: 4 }),
+    row({ scheduleEntryId: "d2", calendarDayKey: "2026-07-07", stageNum: 4 }),
+  ];
+  const multiDayLabel = buildDayKeyToLabel(multiDaySchedule, "UTC");
+
+  function parseMulti(query: string) {
+    return parseQueryFilters(query, multiDaySchedule, multiDayLabel);
+  }
+
+  it("matches only Tuesday July 7 when query mentions 'tuesday, july 7'", () => {
+    const f = parseMulti(
+      "i only want to move routines for tuesday, july 7 right now"
+    );
+    expect(f.dayKeys).toEqual(["2026-07-07"]);
+    expect(f.dayKeys).not.toContain("2026-07-05");
+  });
+
+  it("matches only Sunday July 5 when query mentions 'sunday, july 5'", () => {
+    const f = parseMulti("show me the july 5 routines");
+    expect(f.dayKeys).toEqual(["2026-07-05"]);
+    expect(f.dayKeys).not.toContain("2026-07-07");
+  });
+
+  it("matches by weekday alone when no day number given", () => {
+    const f = parseMulti("show me all tuesday routines");
+    expect(f.dayKeys).toContain("2026-07-07");
+    expect(f.dayKeys).not.toContain("2026-07-05");
+  });
+
+  it("does NOT match on month name alone — 'July' is ambiguous", () => {
+    const f = parseMulti("show me all july routines");
+    // Neither day should be matched when only the month is mentioned
+    expect(f.dayKeys ?? []).toHaveLength(0);
+  });
+
+  it("handles ordinal suffix: 'july 7th' matches 2026-07-07", () => {
+    const f = parseMulti("rearrange routines for july 7th");
+    expect(f.dayKeys).toContain("2026-07-07");
+    expect(f.dayKeys).not.toContain("2026-07-05");
+  });
+});

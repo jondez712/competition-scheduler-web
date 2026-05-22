@@ -22,22 +22,53 @@ export function scheduleRoutinesSignature(rows: ScheduledRoutine[]): string {
     .join("|");
 }
 
+/** Whether one routine's slot differs from its baseline row (time or stage/day). */
+export function entryDiffersFromBaseline(
+  entry: ScheduledRoutine,
+  baselineRow: ScheduledRoutine | undefined
+): boolean {
+  if (!baselineRow) return true;
+  return (
+    entry.start.getTime() !== baselineRow.start.getTime() ||
+    entry.end.getTime() !== baselineRow.end.getTime() ||
+    entry.stageNum !== baselineRow.stageNum ||
+    entry.calendarDayKey !== baselineRow.calendarDayKey
+  );
+}
+
+/** Entry IDs whose slot (time/stage/day) differs from the last loaded baseline. */
+export function computeChangedEntryIds(
+  draft: ScheduledRoutine[],
+  baseline: ScheduledRoutine[]
+): Set<string> {
+  const byId = new Map(baseline.map((r) => [r.scheduleEntryId, r]));
+  const changed = new Set<string>();
+  for (const e of draft) {
+    if (entryDiffersFromBaseline(e, byId.get(e.scheduleEntryId))) {
+      changed.add(e.scheduleEntryId);
+    }
+  }
+  return changed;
+}
+
 export function slotsMatchBaseline(next: ScheduledRoutine[], baseline: ScheduledRoutine[]): boolean {
   if (next.length !== baseline.length) return false;
   const byId = new Map(baseline.map((r) => [r.scheduleEntryId, r]));
   for (const e of next) {
     const o = byId.get(e.scheduleEntryId);
     if (!o) return false;
-    if (
-      e.start.getTime() !== o.start.getTime() ||
-      e.end.getTime() !== o.end.getTime() ||
-      e.stageNum !== o.stageNum ||
-      e.calendarDayKey !== o.calendarDayKey
-    ) {
-      return false;
-    }
+    if (entryDiffersFromBaseline(e, o)) return false;
   }
   return true;
+}
+
+/** Draft differs from baseline and/or studio locks are set (unpublished session work). */
+export function sessionHasUnpublishedWork(
+  draft: ScheduledRoutine[],
+  baseline: ScheduledRoutine[],
+  lockedStudios: string[]
+): boolean {
+  return !slotsMatchBaseline(draft, baseline) || lockedStudios.length > 0;
 }
 
 function djb2Hex(input: string): string {

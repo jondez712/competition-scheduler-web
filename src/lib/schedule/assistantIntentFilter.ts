@@ -76,7 +76,12 @@ function normalizeDivisionPlurals(q: string): string {
     .replace(/\bduos\b/g, "duo");
 }
 
-/** Max rows sent to the model from the filtered result (anchors may add a few more). */
+/**
+ * Max rows returned by applyQueryFilters for the view context (sidebar badge +
+ * conversation carry-forward). This cap applies ONLY to the UI-visible focus
+ * list — it does NOT limit the planner, LLM context, or validatePlan.
+ * The planner world model uses scope-based stage-day routing instead.
+ */
 const MAX_FILTER_ROWS = 200;
 
 // ---------------------------------------------------------------------------
@@ -188,10 +193,22 @@ export function parseQueryFilters(
   }
 
   // --- Day ---
+  // Strip ordinal suffixes so "July 7th" matches the label "July 7".
+  const qForDay = q.replace(/\b(\d+)(st|nd|rd|th)\b/g, "$1");
   const matchedDayKeys: string[] = [];
   for (const [key, label] of Object.entries(dayKeyToLabel)) {
-    const parts = label.toLowerCase().split(/[\s,]+/).filter((p) => p.length >= 4);
-    if (parts.some((p) => q.includes(p))) {
+    const labelLower = label.toLowerCase();
+    // Labels are formatted "Weekday, Month Day" (e.g. "Tuesday, July 7").
+    // We require either the weekday name OR the "Month Day" pair to appear in
+    // the query.  Matching on the month name alone ("july") is intentionally
+    // avoided because it is shared by every day within the same month and
+    // would incorrectly include all of them.
+    const commaIdx = labelLower.indexOf(",");
+    const weekday = commaIdx > 0 ? labelLower.slice(0, commaIdx).trim() : "";
+    const monthDay = commaIdx > 0 ? labelLower.slice(commaIdx + 1).trim() : labelLower;
+    const weekdayInQuery = weekday.length >= 4 && qForDay.includes(weekday);
+    const monthDayInQuery = monthDay.length >= 4 && qForDay.includes(monthDay);
+    if (weekdayInQuery || monthDayInQuery || qForDay.includes(key)) {
       matchedDayKeys.push(key);
     }
   }

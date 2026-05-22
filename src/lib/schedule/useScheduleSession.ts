@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   SCHEDULE_UNDO_MAX_DEPTH,
   cloneScheduledRoutines,
   computeBaselineRevision,
+  computeChangedEntryIds,
+  sessionHasUnpublishedWork,
   slotsMatchBaseline,
   type SessionSnapshot,
   pushPastSnapshot,
@@ -12,6 +14,7 @@ import {
 import {
   clearImportDraft,
   deserializeDraftRows,
+  importDraftMatchesSession,
   loadImportDraft,
   persistImportDraftFromState,
 } from "@/lib/schedule/scheduleDraftStorage";
@@ -198,6 +201,8 @@ export type UseScheduleSessionOptions = {
 export function useScheduleSession({ competitionId, active }: UseScheduleSessionOptions) {
   const [state, dispatch] = useReducer(sessionReducer, initialSessionState);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [persistPending, setPersistPending] = useState(false);
+  const [localDraftSyncToken, setLocalDraftSyncToken] = useState(0);
 
   useLayoutEffect(() => {
     dispatch({ type: "RESET" });
@@ -305,6 +310,7 @@ export function useScheduleSession({ competitionId, active }: UseScheduleSession
     if (!state.baselineRevision || state.restoreOffer) return;
     if (slotsMatchBaseline(state.draft, state.baseline) && state.lockedStudios.length === 0) {
       clearImportDraft(competitionId);
+      setLocalDraftSyncToken((n) => n + 1);
       return;
     }
     persistImportDraftFromState({
@@ -313,6 +319,7 @@ export function useScheduleSession({ competitionId, active }: UseScheduleSession
       draft: state.draft,
       lockedStudios: state.lockedStudios,
     });
+    setLocalDraftSyncToken((n) => n + 1);
   }, [competitionId, state.baselineRevision, state.draft, state.baseline, state.lockedStudios, state.restoreOffer]);
 
   useEffect(() => {
@@ -321,11 +328,14 @@ export function useScheduleSession({ competitionId, active }: UseScheduleSession
         clearTimeout(persistTimerRef.current);
         persistTimerRef.current = null;
       }
+      setPersistPending(false);
       return;
     }
     if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    setPersistPending(true);
     persistTimerRef.current = setTimeout(() => {
       persistTimerRef.current = null;
+      setPersistPending(false);
       flushDraftToStorage();
     }, 450);
     return () => {
@@ -343,6 +353,39 @@ export function useScheduleSession({ competitionId, active }: UseScheduleSession
     [state.draft, state.baseline]
   );
 
+  const changedEntryIds = useMemo(
+    () => computeChangedEntryIds(state.draft, state.baseline),
+    [state.draft, state.baseline]
+  );
+
+  const hasUnpublishedWork = useMemo(
+    () => sessionHasUnpublishedWork(state.draft, state.baseline, state.lockedStudios),
+    [state.draft, state.baseline, state.lockedStudios]
+  );
+
+  const isDraftPersistedLocally = useMemo(() => {
+    if (!hasUnpublishedWork || !state.baselineRevision) return true;
+    return importDraftMatchesSession({
+      competitionId,
+      baselineRevision: state.baselineRevision,
+      draft: state.draft,
+      lockedStudios: state.lockedStudios,
+      slotsMatch: slotsMatchBaseline,
+    });
+  }, [
+    hasUnpublishedWork,
+    competitionId,
+    state.baselineRevision,
+    state.draft,
+    state.lockedStudios,
+    localDraftSyncToken,
+  ]);
+
+  const shouldWarnBeforeUnload = useMemo(
+    () => hasUnpublishedWork && (persistPending || !isDraftPersistedLocally),
+    [hasUnpublishedWork, persistPending, isDraftPersistedLocally]
+  );
+
   return {
     baseline: state.baseline,
     draft: state.draft,
@@ -355,6 +398,9 @@ export function useScheduleSession({ competitionId, active }: UseScheduleSession
     canUndo,
     canRedo,
     isDirtyVsBaseline,
+    changedEntryIds,
+    hasUnpublishedWork,
+    shouldWarnBeforeUnload,
     restoreOffer: state.restoreOffer,
     applyRestore,
     discardRestoreOffer,

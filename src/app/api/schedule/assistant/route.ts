@@ -114,6 +114,7 @@ export async function POST(request: Request) {
             filteredEntryIds: result.filteredEntryIds,
             querySource: result.querySource,
             responseMs: result.responseMs,
+            showcaseFulfillment: result.showcaseFulfillment,
           })
         );
       } catch (e) {

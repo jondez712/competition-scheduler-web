@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   cloneScheduledRoutines,
   computeBaselineRevision,
+  computeChangedEntryIds,
   scheduleRoutinesSignature,
+  sessionHasUnpublishedWork,
   slotsMatchBaseline,
   pushPastSnapshot,
 } from "./scheduleSessionCore";
@@ -58,6 +60,26 @@ describe("scheduleSessionCore", () => {
     const base = [routine({ scheduleEntryId: "e1", stageNum: 1 })];
     const next = [routine({ scheduleEntryId: "e1", stageNum: 2 })];
     expect(slotsMatchBaseline(next, base)).toBe(false);
+  });
+
+  it("computeChangedEntryIds lists only moved slots", () => {
+    const base = [
+      routine({ scheduleEntryId: "e1", stageNum: 1 }),
+      routine({ scheduleEntryId: "e2", stageNum: 1 }),
+    ];
+    const draft = [
+      routine({ scheduleEntryId: "e1", stageNum: 2 }),
+      routine({ scheduleEntryId: "e2", stageNum: 1 }),
+    ];
+    expect(computeChangedEntryIds(draft, base)).toEqual(new Set(["e1"]));
+  });
+
+  it("sessionHasUnpublishedWork is true for dirty draft or studio locks", () => {
+    const base = [routine({ scheduleEntryId: "e1" })];
+    expect(sessionHasUnpublishedWork(base, base, [])).toBe(false);
+    expect(sessionHasUnpublishedWork(base, base, ["Studio A"])).toBe(true);
+    const moved = [routine({ scheduleEntryId: "e1", stageNum: 2 })];
+    expect(sessionHasUnpublishedWork(moved, base, [])).toBe(true);
   });
 
   it("computeBaselineRevision is stable for same inputs", () => {

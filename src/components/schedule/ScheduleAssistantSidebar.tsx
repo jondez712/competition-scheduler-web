@@ -9,6 +9,7 @@ import {
 import { studioLockKeysFromList } from "@/lib/schedule/studioLock";
 import { applyScheduleAssistantOps, type ScheduleAssistantOp } from "@/lib/schedule/scheduleAssistantOps";
 import type { ScheduleQueryFilters } from "@/lib/schedule/assistantIntentFilter";
+import type { ShowcaseFulfillmentMetrics } from "@/lib/schedule/assistantGoalModel";
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -172,6 +173,7 @@ export function ScheduleAssistantSidebar({
     reply: string;
     /** Snapshot of schedule rows at the time ops were proposed (for diff labeling). */
     snapshotRows: ScheduledRoutine[];
+    showcaseFulfillment?: ShowcaseFulfillmentMetrics;
   } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -276,6 +278,7 @@ export function ScheduleAssistantSidebar({
       let nextActiveFilters: ScheduleQueryFilters | undefined;
       let nextFilteredEntryIds: string[] | undefined;
       let nextQuerySource: "local" | "ai" | undefined;
+      let nextShowcaseFulfillment: ShowcaseFulfillmentMetrics | undefined;
 
       outer: while (true) {
         const { done, value } = await reader.read();
@@ -298,6 +301,7 @@ export function ScheduleAssistantSidebar({
               filteredEntryIds?: string[];
               querySource?: "local" | "ai";
               responseMs?: number;
+              showcaseFulfillment?: ShowcaseFulfillmentMetrics;
             };
             if (evt.type === "chunk") {
               // Tool-call argument chunks — no visible content to render yet.
@@ -307,6 +311,7 @@ export function ScheduleAssistantSidebar({
               nextActiveFilters = evt.activeFilters;
               nextFilteredEntryIds = evt.filteredEntryIds;
               nextQuerySource = evt.querySource;
+              nextShowcaseFulfillment = evt.showcaseFulfillment;
               break outer;
             } else if (evt.type === "error") {
               streamError = evt.error ?? "Unknown assistant error";
@@ -355,7 +360,12 @@ export function ScheduleAssistantSidebar({
         ]);
       } else if (ops.length > 0) {
         // Any proposed change — show preview card first, require explicit confirmation.
-        setPendingOps({ ops: ops as ScheduleAssistantOp[], reply: assistantBody, snapshotRows: schedule });
+        setPendingOps({
+          ops: ops as ScheduleAssistantOp[],
+          reply: assistantBody,
+          snapshotRows: schedule,
+          showcaseFulfillment: nextShowcaseFulfillment,
+        });
         setMessages((m) => [
           ...m,
           {
@@ -461,13 +471,13 @@ export function ScheduleAssistantSidebar({
               (k) => (activeContext.filters[k as keyof typeof activeContext.filters] as unknown[] | undefined)?.length
             ) ? (
               <p className="flex items-center gap-1 text-[10px] text-zinc-500 dark:text-zinc-400">
-                <span className="inline-block h-1.5 w-1.5 rounded-full bg-pink-500" aria-hidden />
-                Filtered context active ({activeContext.entryIds.length} routines)
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-blue-400" aria-hidden />
+                Conversation focus ({activeContext.entryIds.length} routines) — planner sees full schedule
                 <button
                   type="button"
                   className="ml-auto rounded px-1 hover:text-zinc-700 dark:hover:text-zinc-200"
                   onClick={() => setActiveContext(null)}
-                  title="Clear filter context"
+                  title="Clear conversation focus"
                 >
                   ✕
                 </button>
@@ -522,8 +532,27 @@ export function ScheduleAssistantSidebar({
             {pendingOps ? (
               <div className="shrink-0 border-t border-amber-200 bg-amber-50/80 p-3 dark:border-amber-700 dark:bg-amber-950/30">
                 <p className="mb-2 text-[11px] font-semibold text-amber-900 dark:text-amber-200">
-                  Planned changes ({pendingOps.ops.length}) — review before applying
+                  Planned changes ({pendingOps.ops.length})
+                  {pendingOps.showcaseFulfillment &&
+                  pendingOps.showcaseFulfillment.fulfilledBlocks <
+                    pendingOps.showcaseFulfillment.requestedBlocks
+                    ? " — partial showcase"
+                    : ""}{" "}
+                  — review before applying
                 </p>
+                {pendingOps.showcaseFulfillment ? (
+                  <p className="mb-2 text-[10px] text-amber-800 dark:text-amber-300">
+                    {pendingOps.showcaseFulfillment.fulfilledBlocks}/
+                    {pendingOps.showcaseFulfillment.requestedBlocks} blocks fulfilled · score{" "}
+                    {Math.round(pendingOps.showcaseFulfillment.fulfillmentScore * 100)}%
+                    {pendingOps.showcaseFulfillment.partialBlocks > 0
+                      ? ` · ${pendingOps.showcaseFulfillment.partialBlocks} partial`
+                      : ""}
+                    {pendingOps.showcaseFulfillment.failedBlocks > 0
+                      ? ` · ${pendingOps.showcaseFulfillment.failedBlocks} failed`
+                      : ""}
+                  </p>
+                ) : null}
                 <div className="mb-3 max-h-32 overflow-y-auto rounded border border-amber-200 bg-white/80 p-1.5 text-[10px] text-zinc-700 dark:border-amber-700 dark:bg-zinc-900/60 dark:text-zinc-300">
                   {pendingOps.ops.map((op, i) => {
                     if (op.op !== "swap_by_entry_id") {

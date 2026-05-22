@@ -8,6 +8,7 @@ export function ScheduleSessionToolbar({
   onUndo,
   onRedo,
   isDirtyVsBaseline,
+  movedRoutineCount = 0,
   onRevertToBaseline,
   restoreOffer,
   onRestore,
@@ -31,6 +32,7 @@ export function ScheduleSessionToolbar({
   onUndo: () => void;
   onRedo: () => void;
   isDirtyVsBaseline: boolean;
+  movedRoutineCount?: number;
   onRevertToBaseline: () => void;
   restoreOffer: SessionSnapshot | null;
   onRestore: () => void;
@@ -102,6 +104,19 @@ export function ScheduleSessionToolbar({
         >
           {isDirtyVsBaseline ? "Unpublished edits" : "In sync with last load"}
         </span>
+
+        {movedRoutineCount > 0 ? (
+          <span
+            className="inline-flex items-center gap-1.5 text-xs text-amber-800 dark:text-amber-300/90"
+            title="Amber dot on timeline = routine moved vs last load, not yet published"
+          >
+            <span
+              className="inline-block h-2 w-2 shrink-0 rounded-full bg-amber-500 ring-2 ring-amber-200 dark:ring-amber-900/80"
+              aria-hidden
+            />
+            {movedRoutineCount} moved
+          </span>
+        ) : null}
 
         <button
           type="button"

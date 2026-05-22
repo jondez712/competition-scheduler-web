@@ -5,6 +5,18 @@ import {
   pruneHitchkickPayloadForAssistant,
 } from "@/lib/schedule/assistantPayloadPrune";
 import type { ScheduledRoutine } from "@/lib/schedule/types";
+import {
+  normalizeSchedule,
+  semanticRowsToTsv,
+} from "@/lib/schedule/scheduleNormalization";
+import {
+  buildPlannerWorldModel,
+  buildViewContext,
+  resolvePlannerScope,
+  expandScopeWithReferencedRows,
+  buildPlannerContext,
+  buildTsvFromContext,
+} from "@/lib/schedule/plannerWorldModel";
 import { intervalsOverlap } from "@/lib/schedule/timeParsing";
 import { defaultAssistantChatModelId } from "@/lib/openaiDefaultModelIds";
 import { openaiAssistantEnvKeys } from "@/lib/openaiAssistantEnvKeys";
@@ -35,10 +47,7 @@ import {
   buildPlannerUserBlock,
   callPlannerLLM,
 } from "@/lib/schedule/assistantPlanner";
-import {
-  resolveReferencedRows,
-  mergeReferencedRows,
-} from "@/lib/schedule/assistantEntityResolve";
+import { resolveReferencedRows } from "@/lib/schedule/assistantEntityResolve";
 import {
   validatePlan,
   planToOps,
@@ -46,6 +55,15 @@ import {
   detectBulkOpenerIntent,
   buildBulkOpenerOps,
 } from "@/lib/schedule/assistantPlanExecutor";
+import { extractSchedulingGoals } from "@/lib/schedule/assistantGoalExtract";
+import type {
+  SchedulingGoalRequest,
+  ShowcaseFulfillmentMetrics,
+} from "@/lib/schedule/assistantGoalModel";
+
+/** Below this score, showcase fast path falls through to LLM for gap-fill. */
+const SHOWCASE_LLM_GAP_FILL_THRESHOLD = 0.75;
+import { planShowcaseDay } from "@/lib/schedule/assistantShowcasePlanner";
 import type { ScheduleAssistantOp } from "@/lib/schedule/scheduleAssistantOps";
 
 function env(name: string): string | undefined {
@@ -144,6 +162,8 @@ export type AssistantPipelineResult = {
     totalTokens: number;
     model: string;
   };
+  /** Per-block showcase fulfillment when deterministic showcase planner ran. */
+  showcaseFulfillment?: ShowcaseFulfillmentMetrics;
   /**
    * Token counts from the OpenAI response (only populated on the non-streaming
    * path; undefined for local/gate results and streaming calls).
@@ -236,66 +256,9 @@ function scheduleDayLegend(rows: ScheduledRoutine[], timeZone: string): string {
     .join("\n");
 }
 
-function escCell(s: string, max = 96): string {
-  return s.replace(/\t/g, " ").replace(/\r?\n/g, " ").slice(0, max);
-}
-
 function scheduleTsvForAssistant(rows: ScheduledRoutine[], timeZone: string): string {
-  const header =
-    "scheduleEntryId\troutineNumber\tstudio\tcalendarDayKey\tweekday\tstageNum\tstartLocal\tendLocal\tlcd\tchoreographer\taotySegment\ttitle";
-  const lines: string[] = [];
-  const fmt = (d: Date) =>
-    new Intl.DateTimeFormat("en-US", {
-      timeZone,
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true,
-    }).format(d);
-
-  for (const r of rows) {
-    const lcd = [r.levelName, r.divisionName, r.categoryName]
-      .map((x) => String(x || "").trim())
-      .filter(Boolean)
-      .join(" › ");
-    lines.push(
-      [
-        r.scheduleEntryId,
-        escCell(String(r.routineNumber), 12),
-        escCell(r.studioName || r.studioCode || "", 36),
-        r.calendarDayKey,
-        weekdayShortForDayKey(r.calendarDayKey, timeZone),
-        String(r.stageNum),
-        fmt(r.start),
-        fmt(r.end),
-        escCell(lcd, 44),
-        escCell(r.choreographer || "", 36),
-        escCell(r.aotySegment || "", 24),
-        escCell(r.routineTitle || "", 48),
-      ].join("\t")
-    );
-  }
-
-  const maxChars = 130_000;
-  const full = [header, ...lines].join("\n");
-  if (full.length <= maxChars) return full;
-
-  let lo = 0;
-  let hi = lines.length;
-  let best = 0;
-  while (lo <= hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    const trial = [header, ...lines.slice(0, mid)].join("\n");
-    if (trial.length <= maxChars) {
-      best = mid;
-      lo = mid + 1;
-    } else {
-      hi = mid - 1;
-    }
-  }
-  return (
-    [header, ...lines.slice(0, best)].join("\n") +
-    `\n/* TSV truncated to ${best}/${lines.length} rows (context limit). */`
-  );
+  const normalized = normalizeSchedule(rows, [], timeZone);
+  return semanticRowsToTsv(normalized.routines);
 }
 
 function studioKeyForOverlap(r: ScheduledRoutine): string {
@@ -638,10 +601,9 @@ You have exactly two tools — always call exactly one per response:
 
 The user message provides:
 1) Calendar days — maps each calendarDayKey (YYYY-MM-DD) to weekday + readable date.
-2) Schedule TSV — scheduleEntryId, routineNumber, studio, calendarDayKey, weekday, stageNum, startLocal, endLocal, lcd (level › division › category), choreographer, aotySegment, title.
+2) Schedule TSV — full semantic rows for in-scope stage-days: scheduleEntryId, routineNumber, studio, calendarDayKey, weekday, stageNum, startLocal, endLocal, lcd (level › division › category), choreographer, aotySegment, title.
    lcd = level › division › category. choreographer is the credited person (not the studio). aotySegment distinguishes Finals solos from AOTY solos at Nationals.
-3) Hitchkick JSON block (when present) — pruned API data with rosterDancerNames/Ids for dancer Q&A.
-${filterNote}
+3) Other stage-days topology — compact summary for stage-days not shown in full above (slot counts, top studios, cohort distribution).${filterNote}
 
 Domain rules:
 - choreographer vs studio: choreographer is the credited person; studioName is the competing business. Never substitute studio name for choreographer.
@@ -673,10 +635,9 @@ The user message provides:
 1) Calendar days — maps each calendarDayKey (YYYY-MM-DD) to weekday + readable date.
 2) Verified same-studio time overlaps — authoritative for "do studios overlap?" questions.
 3) Automated checks — cross-stage travel gaps, group spacing, etc. (not the same as overlap).
-4) Schedule TSV — scheduleEntryId, routineNumber, studio, calendarDayKey, weekday, stageNum, startLocal, endLocal, lcd (level › division › category), choreographer, aotySegment, title.
+4) Schedule TSV — full semantic rows for in-scope stage-days: scheduleEntryId, routineNumber, studio, calendarDayKey, weekday, stageNum, startLocal, endLocal, lcd (level › division › category), choreographer, aotySegment, title.
    lcd = level › division › category. choreographer is the credited person (not the studio). aotySegment distinguishes Finals solos from AOTY solos at Nationals.
-5) Hitchkick JSON block (when present) — pruned API data with rosterDancerNames/Ids for dancer Q&A.
-${filterNote}
+5) Other stage-days topology — compact summary for stage-days not shown in full above (slot counts, top studios, cohort distribution).${filterNote}
 
 Domain rules:
 - choreographer vs studio: choreographer is the credited person; studioName is the competing business. Never substitute studio name for choreographer.
@@ -747,21 +708,61 @@ export async function runAssistantPipeline(
     ? parseQueryFilters(lastUserQuery, schedule, dayKeyToLabel)
     : {};
   const mergedFilters = mergeFilters(input.activeFilters, freshFilters, lastUserQuery);
-  const baseContextRows = schedule.length
+
+  // ---------------------------------------------------------------------------
+  // View context: conversation filter carry-forward (sidebar badge + LLM hint).
+  // Uses capped applyQueryFilters to produce the focused entry ID list that the
+  // sidebar displays and carries across turns. Does NOT limit planning.
+  // ---------------------------------------------------------------------------
+  const viewFocusedRows = schedule.length
     ? applyQueryFilters(schedule, mergedFilters, input.activeEntryIds)
     : [];
-  // Ensure rows explicitly referenced by routine number or entry ID in the query
-  // are always present in context, regardless of active filters.
+  const filteredEntryIds = viewFocusedRows.map((r) => r.scheduleEntryId);
+  const isFiltered = hasAnyFilters(mergedFilters);
+  const viewContext = buildViewContext(mergedFilters, filteredEntryIds);
+
+  // Goal extraction: deterministic parse of structured scheduling requests.
+  // Operates on the full schedule — unaffected by conversation filters.
+  let schedulingGoals: SchedulingGoalRequest | null = null;
+  if (schedule.length > 0) {
+    schedulingGoals = extractSchedulingGoals(lastUserQuery, schedule, dayKeyToLabel);
+  }
+
+  // Helper: access constraints from goals for pipeline logging (local variable)
+  const constraints = schedulingGoals?.constraints ?? {};
+
+  // ---------------------------------------------------------------------------
+  // Planner world model: full topology built from the complete schedule.
+  // All subsequent planning operates on this — never on filtered subsets.
+  // ---------------------------------------------------------------------------
+  const worldModel = schedule.length
+    ? buildPlannerWorldModel(schedule, [], lockedStudiosList, timeZone)
+    : null;
+
+  // Resolve which stage-days get full semantic rows in the LLM context.
+  // Explicitly-referenced routine numbers force their stage-days into scope.
   const referencedRows = schedule.length
     ? resolveReferencedRows(lastUserQuery, schedule)
     : [];
-  const contextRows = mergeReferencedRows(baseContextRows, referencedRows);
-  const filteredEntryIds = contextRows.map((r) => r.scheduleEntryId);
-  const isFiltered = hasAnyFilters(mergedFilters);
+  let scope = worldModel
+    ? resolvePlannerScope(lastUserQuery, schedulingGoals, worldModel, viewContext)
+    : { fullRowStageDays: [] as Array<{ dayKey: string; stageNum: number }> };
+  if (referencedRows.length > 0 && worldModel) {
+    scope = expandScopeWithReferencedRows(
+      scope,
+      referencedRows.map((r) => r.scheduleEntryId),
+      worldModel
+    );
+  }
+
+  // Assemble LLM context: full rows for in-scope stage-days + topology summary.
+  const plannerCtx = worldModel
+    ? buildPlannerContext(scope, worldModel, viewContext)
+    : { semanticRows: [], topologySummary: "", viewHint: "", totalRoutines: 0 };
 
   const reqStart = Date.now();
   const localIntent = classifyLocalQuery(lastUserQuery, mergedFilters);
-  if (localIntent && contextRows.length > 0) {
+  if (localIntent && viewFocusedRows.length > 0) {
     const localRows = filterScheduleRows(schedule, mergedFilters);
     const reply = executeLocalQuery(
       localIntent,
@@ -829,11 +830,15 @@ export async function runAssistantPipeline(
   }
 
   const dayLegend = schedule.length ? scheduleDayLegend(schedule, timeZone) : "";
-  const tsv = contextRows.length
-    ? scheduleTsvForAssistant(contextRows, timeZone)
+
+  // TSV is now built from the scope-based planner context (full rows for affected
+  // stage-days) rather than from a capped contextRows subset.
+  const tsv = plannerCtx.semanticRows.length
+    ? buildTsvFromContext(plannerCtx)
     : "(empty schedule)";
 
-  const shouldRunHeavyAnalysis = !isFollowUp && !isFiltered && schedule.length > 0;
+  // Heavy analysis runs on the full schedule regardless of conversation filters.
+  const shouldRunHeavyAnalysis = !isFollowUp && schedule.length > 0;
 
   const overlapVerified = shouldRunHeavyAnalysis
     ? (() => {
@@ -843,9 +848,7 @@ export async function runAssistantPipeline(
           return "(overlap analysis unavailable)";
         }
       })()
-    : isFollowUp
-      ? "(overlap analysis omitted on follow-up)"
-      : "(overlap analysis omitted — filtered view)";
+    : "(overlap analysis omitted on follow-up)";
 
   const findings = shouldRunHeavyAnalysis
     ? (() => {
@@ -857,28 +860,12 @@ export async function runAssistantPipeline(
       })()
     : "";
 
-  let hitchBlock = "";
-  const cidInt =
-    input.competitionId != null &&
-    Number.isFinite(input.competitionId) &&
-    input.competitionId > 0
-      ? Math.floor(input.competitionId)
-      : 0;
-  const clientPayload = input.hitchkickPayload;
-  const useClientPayload =
-    cidInt > 0 &&
-    clientPayload != null &&
-    typeof clientPayload === "object" &&
-    Object.keys(clientPayload as object).length > 0;
+  // Hitchkick JSON is no longer sent to the LLM. The topology summary in the
+  // planner context replaces it with a compact semantic representation.
 
-  if (useClientPayload) {
-    hitchBlock = formatHitchkickJsonBlock(clientPayload, cidInt, "client-cache");
-  } else if (cidInt > 0) {
-    hitchBlock = await hitchkickPayloadBlock(cidInt);
-  }
-
-  const filterNote = isFiltered
-    ? `\n\nFilter context: the TSV below shows only ${contextRows.length} routines matching the current query filters (${JSON.stringify(mergedFilters)}). The full competition has ${schedule.length} routines. Refer to the "Calendar days" section for all available days.`
+  // View note: informational hint about conversation focus — does not restrict rows.
+  const viewNote = viewContext.focusHint
+    ? `\n\nConversation focus: ${viewContext.focusHint}`
     : "";
 
   // Route to the appropriate prompt mode based on query intent.
@@ -911,8 +898,64 @@ export async function runAssistantPipeline(
       };
     }
 
-    const plannerSystem = buildPlannerSystemPrompt(competitionName, timeZone);
-    const plannerUserBlock = buildPlannerUserBlock(lastUserQuery, tsv);
+    // ---------------------------------------------------------------------------
+    // Deterministic fast path: structured showcase / reorder goal
+    // "8a–8:30a Junior Duo/Trios, 9a–11:30a Teen AOTY solos…"
+    // Bypasses the planner LLM when goals were parsed successfully.
+    // ---------------------------------------------------------------------------
+    let showcaseFulfillmentForGapFill: ShowcaseFulfillmentMetrics | undefined;
+
+    if (
+      schedulingGoals &&
+      (schedulingGoals.kind === "showcase_day" || schedulingGoals.kind === "reorder_stage") &&
+      schedulingGoals.timeBlocks.length > 0
+    ) {
+      const showcaseResult = planShowcaseDay(schedule, schedulingGoals, timeZone, worldModel ?? undefined);
+      const { ops, summary, warnings, metrics } = showcaseResult;
+      showcaseFulfillmentForGapFill = metrics;
+      const responseMs = Date.now() - reqStart;
+      console.log(
+        `[assistant] source=deterministic/showcase-planner kind=${schedulingGoals.kind} ` +
+          `blocks=${metrics.requestedBlocks} fulfilled=${metrics.fulfilledBlocks} ` +
+          `partial=${metrics.partialBlocks} failed=${metrics.failedBlocks} ` +
+          `score=${metrics.fulfillmentScore.toFixed(2)} ops=${ops.length} warnings=${warnings.length} ms=${responseMs}`
+      );
+
+      // For structured showcase/reorder goals, always trust the deterministic
+      // planner when it produced any operations or handled any blocks — even if
+      // fulfillment is partial.  The block-by-block summary communicates exactly
+      // what succeeded and what couldn't be done.  Falling through to the LLM
+      // discards the deterministic plan and produces a single-block AI answer
+      // (Local: 0 / AI: 1), which is worse than a partial deterministic result.
+      if (ops.length > 0 || metrics.fulfilledBlocks > 0 || metrics.partialBlocks > 0) {
+        return {
+          reply: summary,
+          operations: ops,
+          querySource: "local",
+          activeFilters: mergedFilters,
+          filteredEntryIds,
+          responseMs,
+          promptMode,
+          showcaseFulfillment: metrics,
+        };
+      }
+      // All blocks completely failed (0 ops, 0 fulfilled, 0 partial) — only then
+      // fall through to the LLM planner.
+      console.log(`[assistant] showcase fast path produced 0 ops and 0 placements — falling through to LLM planner`);
+    }
+
+    const plannerSystem = buildPlannerSystemPrompt(
+      competitionName,
+      timeZone,
+      schedulingGoals ?? undefined
+    );
+    const plannerUserBlock = buildPlannerUserBlock(
+      lastUserQuery,
+      tsv,
+      schedulingGoals ?? undefined,
+      showcaseFulfillmentForGapFill,
+      plannerCtx.topologySummary || undefined
+    );
 
     const plannerResult = await callPlannerLLM(
       options.apiKey,
@@ -926,7 +969,13 @@ export async function runAssistantPipeline(
       return { error: plannerResult.error, status: plannerResult.status };
     }
 
-    const { valid, rejected } = validatePlan(plannerResult.plan, contextRows);
+    // Validate against the FULL schedule — not contextRows — so swaps between
+    // any two valid entries are accepted regardless of LLM context scoping.
+    const { valid, rejected } = validatePlan(
+      plannerResult.plan,
+      schedule,
+      schedulingGoals?.constraints
+    );
     const operations = planToOps(valid);
     const reply = generateReplyFromPlan(plannerResult.plan, valid, rejected);
 
@@ -934,7 +983,7 @@ export async function runAssistantPipeline(
     console.log(
       `[assistant] source=ai/planner model=${model} intent=${plannerResult.plan.intent} ` +
         `riskLevel=${plannerResult.plan.riskLevel} ops=${operations.length} ` +
-        `rejected=${rejected.length} contextRows=${contextRows.length} ms=${responseMs}`
+        `rejected=${rejected.length} scopeRows=${plannerCtx.semanticRows.length} total=${schedule.length} ms=${responseMs}`
     );
 
     const rawUsage = plannerResult.usage;
@@ -967,12 +1016,16 @@ export async function runAssistantPipeline(
   const system = buildRetrievalSystemPrompt(
     competitionName,
     timeZone,
-    filterNote,
+    viewNote,
     lockedStudiosInstruction
   );
 
+  const topologyNote = plannerCtx.topologySummary
+    ? `\n\nOther stage-days (not shown above):\n${plannerCtx.topologySummary}`
+    : "";
+
   const userBlock = `Calendar days (timezone ${timeZone}):\n${dayLegend || "—"}
-Filtered schedule TSV (${contextRows.length} of ${schedule.length} total routines${isFiltered ? ` — filters: ${JSON.stringify(mergedFilters)}` : ""}):\n${tsv}${hitchBlock}
+Schedule TSV (${plannerCtx.semanticRows.length} of ${schedule.length} total routines — in-scope stage-days shown in full):\n${tsv}${topologyNote}
 
 Conversation (respond to the latest user request):
 ${messages
@@ -992,7 +1045,7 @@ ${messages
 
   const responseMs = Date.now() - reqStart;
   console.log(
-    `[assistant] source=ai model=${model} contextRows=${contextRows.length} ` +
+    `[assistant] source=ai model=${model} scopeRows=${plannerCtx.semanticRows.length} ` +
       `total=${schedule.length} ms=${responseMs}`
   );
 

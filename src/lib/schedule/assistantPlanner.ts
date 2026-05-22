@@ -7,11 +7,17 @@
  *  - User: query + compact TSV (no overlap/findings/history)
  * Target: 800–1500 prompt tokens vs ~7300 for the old mutation prompt.
  */
+import type {
+  SchedulingGoalRequest,
+  ShowcaseFulfillmentMetrics,
+} from "@/lib/schedule/assistantGoalModel";
+import { minutesToLabel } from "@/lib/schedule/assistantGoalModel";
 
 export type PlannerIntent =
   | "swap_routines"
   | "bulk_stage_assignment"
   | "reorder_stage"
+  | "showcase_day"
   | "move_routine"
   | "query_schedule";
 
@@ -62,10 +68,11 @@ export const SCHEDULE_PLAN_TOOL = [
               "swap_routines",
               "bulk_stage_assignment",
               "reorder_stage",
+              "showcase_day",
               "move_routine",
               "query_schedule",
             ],
-            description: "The primary intent of the user request.",
+            description: "The primary intent of the user request. Use 'showcase_day' when placing cohorts into specific time windows.",
           },
           riskLevel: {
             type: "string",
@@ -144,46 +151,105 @@ export const SCHEDULE_PLAN_TOOL = [
 // ---------------------------------------------------------------------------
 
 /**
- * Lean planner system prompt (~250 tokens).
- * Instructs infer-first behavior: the planner should NEVER ask the user for
- * mappings it can derive itself from the TSV.
+ * Goal-oriented planner system prompt.
+ *
+ * When a SchedulingGoalRequest is provided (structured goals were parsed
+ * deterministically), the prompt includes a goal summary and heuristic mapping
+ * so the LLM can complete what the deterministic planner could not.
  */
 export function buildPlannerSystemPrompt(
   competitionName: string,
-  timeZone: string
+  timeZone: string,
+  goals?: SchedulingGoalRequest
 ): string {
-  return `You are a schedule mutation planner for a dance competition (${competitionName}, timezone ${timeZone}).
+  const heuristicGuide = `
+HEURISTIC → OPERATION MAPPING:
+- front_load / open with / start with → move target cohort to earliest available slot(s).
+- showcase / feature / highlight → cluster target cohort into the declared time window.
+- spread / spacing / balance (studio-scoped) → generate minimum swaps to avoid back-to-back studio runs.
+- energy_build / ramp up → place ascending level (Mini → Teen → Junior → Senior) within a block.
+- momentum / group together → cluster same division/category in contiguous slots.`;
 
-Given the user's request and the schedule TSV, produce a structured plan using the schedule_plan tool.
+  const goalSection = goals && goals.timeBlocks.length > 0
+    ? `
+DETECTED SCHEDULING GOALS (deterministic pre-parse):
+Kind: ${goals.kind}
+Constraints: ${JSON.stringify(goals.constraints)}
+Heuristics: ${goals.heuristics.join(", ") || "none"}
+Time blocks to fill:
+${goals.timeBlocks
+  .map(
+    (b, i) =>
+      `  ${i + 1}. Stage ${b.stageNum}${b.dayKey ? ` / ${b.dayKey}` : ""} | ${minutesToLabel(b.timeRange.startMinutes)}–${minutesToLabel(b.timeRange.endMinutes)} | Filters: ${JSON.stringify(b.filters)}`
+  )
+  .join("\n")}
+
+For each time block, scan the TSV for routines matching the filters and whose startLocal falls in the window.
+Emit swap operations to place as many matching routines into those windows as possible.
+Use intent: "showcase_day".`
+    : "";
+
+  return `You are a goal-oriented scheduling planner for a dance competition (${competitionName}, timezone ${timeZone}).
+
+Given the user's goal and the schedule TSV, produce a structured plan using the schedule_plan tool.
 
 INFER-FIRST PRINCIPLE:
 - Always infer the specific routines from the TSV yourself — never ask the user for IDs or mappings.
-- For bulk patterns (e.g. "start every stage with a Larkin routine", "open each day with a Mini solo"):
-  Step 1 — group rows by (stageNum, calendarDayKey).
-  Step 2 — within each group find the earliest target routine (by startLocal).
-  Step 3 — swap it with the current first-slot routine if not already first.
-  Step 4 — emit one swap per group. State what you inferred in planSummary (e.g. "earliest Larkin per stage/day").
-- For spread/even requests (e.g. "spread out Larkin routines"), determine current distribution
-  and propose the minimum swaps to achieve better spacing. State your distribution assumption.
-- Use planSummary to describe what you inferred and what will change — never ask the user to supply this.
+- When a user provides time windows, cohorts, and constraints: produce swaps that place cohorts into those windows.
+  Never ask "what does rearrange mean?" when time blocks and cohorts are already specified.
+- For bulk opener patterns: group by (stageNum, calendarDayKey), find earliest target, swap.
+- For spread requests: compute distribution, propose minimum spacing swaps.
+- Use planSummary to describe your inference (e.g. "Placed Junior Duo/Trio into 8–8:30a Stage 4 slot").
+${heuristicGuide}${goalSection}
 
 Hard rules:
 - Only reference scheduleEntryIds that appear in the TSV.
 - Every swap MUST have both routines on the same calendarDayKey (YYYY-MM-DD).
+- If constraints include sameStageOnly, both routines must share the same stageNum.
+- If constraints include sameDivisionCategoryOnly, both routines must share divisionName + categoryName.
 - Do not produce verbose reasoning — output only the structured plan.
 - If no valid swaps are possible, return proposedOperations: [] and explain in planSummary.`;
 }
 
 /**
  * Compact planner user block.
- * Contains only the user's query and the relevant schedule TSV.
- * No overlap block, no findings, no conversation history.
+ * When a SchedulingGoalRequest is provided, a compact JSON summary is appended
+ * so the LLM can refine or complete what the deterministic planner could not.
  */
-export function buildPlannerUserBlock(query: string, compactTsv: string): string {
-  return `Request: ${query}
+export function buildPlannerUserBlock(
+  query: string,
+  compactTsv: string,
+  goals?: SchedulingGoalRequest,
+  showcaseFulfillment?: ShowcaseFulfillmentMetrics,
+  topologySummary?: string
+): string {
+  const goalAppend = goals && goals.timeBlocks.length > 0
+    ? `\n\nDeterministic pre-parse (refine or complete failed/partial blocks only):\n${JSON.stringify(
+        {
+          kind: goals.kind,
+          constraints: goals.constraints,
+          showcaseFulfillment,
+          timeBlocks: goals.timeBlocks.map((b) => ({
+            stage: b.stageNum,
+            day: b.dayKey,
+            window: `${minutesToLabel(b.timeRange.startMinutes)}–${minutesToLabel(b.timeRange.endMinutes)}`,
+            filters: b.filters,
+          })),
+        },
+        null,
+        2
+      )}`
+    : "";
 
-Schedule entries (scheduleEntryId, routineNumber, studio, calendarDayKey, stageNum, startLocal, endLocal, lcd):
-${compactTsv}`;
+  const topologyAppend =
+    topologySummary?.trim()
+      ? `\n\nOther stage-days (topology summary — not shown in detail above):\n${topologySummary}`
+      : "";
+
+  return `Request: ${query}${goalAppend}
+
+Schedule entries (scheduleEntryId, routineNumber, studio, calendarDayKey, stageNum, startLocal, endLocal, lcd, aotySegment):
+${compactTsv}${topologyAppend}`;
 }
 
 // ---------------------------------------------------------------------------

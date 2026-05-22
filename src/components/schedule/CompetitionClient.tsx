@@ -32,6 +32,7 @@ import { ImportedScheduleView } from "@/components/schedule/ImportedScheduleView
 import { ScheduleAssistantSidebar } from "@/components/schedule/ScheduleAssistantSidebar";
 import { ScheduleSessionToolbar } from "@/components/schedule/ScheduleSessionToolbar";
 import { cloneScheduledRoutines } from "@/lib/schedule/scheduleSessionCore";
+import { useBeforeUnloadGuard } from "@/lib/schedule/useBeforeUnloadGuard";
 import { useScheduleSession } from "@/lib/schedule/useScheduleSession";
 
 const publishPreviewUiEnabled =
@@ -114,6 +115,14 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
   const sessionReady = scheduleSession.baseline.length > 0;
   const displayBaseline = sessionReady ? scheduleSession.baseline : scheduled;
   const displayDraft = sessionReady ? scheduleSession.draft : scheduled;
+
+  useBeforeUnloadGuard(
+    scheduleSessionActive &&
+      sessionReady &&
+      entryMode === "import" &&
+      !scheduleSession.restoreOffer &&
+      scheduleSession.shouldWarnBeforeUnload
+  );
   const scheduleServerSig = useMemo(
     () =>
       scheduled
@@ -622,6 +631,7 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
               onLockedStudiosChange={(next) => scheduleSession.setLockedStudios(next)}
               interactionLocked={!!scheduleSession.restoreOffer}
               scheduleUiResetKey={scheduleUiResetKey}
+              changedEntryIds={scheduleSession.changedEntryIds}
               sessionToolbar={
                 <ScheduleSessionToolbar
                   canUndo={scheduleSession.canUndo}
@@ -629,6 +639,7 @@ export function CompetitionClient({ competitionId }: { competitionId: number }) 
                   onUndo={scheduleSession.undo}
                   onRedo={scheduleSession.redo}
                   isDirtyVsBaseline={scheduleSession.isDirtyVsBaseline}
+                  movedRoutineCount={scheduleSession.changedEntryIds.size}
                   onRevertToBaseline={handleRevertToBaseline}
                   restoreOffer={scheduleSession.restoreOffer}
                   onRestore={scheduleSession.applyRestore}

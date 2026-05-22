@@ -121,3 +121,25 @@ export function clearImportDraft(competitionId: number): void {
 export function deserializeDraftRows(raw: Record<string, unknown>[]): ScheduledRoutine[] {
   return deserializeRoutines(raw);
 }
+
+function lockedStudiosEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  return sa.every((v, i) => v === sb[i]);
+}
+
+/** Whether localStorage holds the same draft + locks as the live session (after auto-save or Save draft). */
+export function importDraftMatchesSession(params: {
+  competitionId: number;
+  baselineRevision: string;
+  draft: ScheduledRoutine[];
+  lockedStudios: string[];
+  slotsMatch: (draft: ScheduledRoutine[], other: ScheduledRoutine[]) => boolean;
+}): boolean {
+  const stored = loadImportDraft(params.competitionId);
+  if (!stored || stored.baselineRevision !== params.baselineRevision) return false;
+  const storedDraft = deserializeDraftRows(stored.draft);
+  if (!params.slotsMatch(params.draft, storedDraft)) return false;
+  return lockedStudiosEqual(params.lockedStudios, stored.lockedStudios);
+}
