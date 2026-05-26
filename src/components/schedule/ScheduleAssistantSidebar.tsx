@@ -645,7 +645,10 @@ export function ScheduleAssistantSidebar({
       setLastError(msg);
       setMessages((m) => [
         ...m,
-        { role: "assistant", content: "Something went wrong sending your message. Try again." },
+        {
+          role: "assistant",
+          content: `Something went wrong sending your message. ${msg ? `(${msg}) ` : ""}Try again.`,
+        },
       ]);
     } finally {
       setLoading(false);
