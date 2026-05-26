@@ -417,6 +417,8 @@ export function ScheduleAssistantSidebar({
               raw?: string;
               label?: string;
               detail?: string;
+              message?: string;
+              phase?: string;
               activeFilters?: ScheduleQueryFilters;
               filteredEntryIds?: string[];
               querySource?: "local" | "ai" | "gate";
@@ -441,6 +443,18 @@ export function ScheduleAssistantSidebar({
                 if (last?.label === nextItem.label && last.detail === nextItem.detail) return items;
                 return [...items, nextItem].slice(-5);
               });
+            } else if (evt.type === "status" && evt.message) {
+              const nextItem = {
+                label: evt.message,
+                detail: typeof evt.phase === "string" ? evt.phase.replaceAll("_", " ") : undefined,
+              };
+              setProgressItems((items) => {
+                const last = items[items.length - 1];
+                if (last?.label === nextItem.label && last.detail === nextItem.detail) return items;
+                return [...items, nextItem].slice(-5);
+              });
+            } else if (evt.type === "heartbeat") {
+              // Keep-alive event for production hosts; no visible UI update needed.
             } else if (evt.type === "done") {
               reply = typeof evt.reply === "string" ? evt.reply : "";
               ops = Array.isArray(evt.operations) ? evt.operations : [];

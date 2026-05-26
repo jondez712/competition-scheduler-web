@@ -8,9 +8,16 @@ import {
 } from "@/lib/schedule/assistantPipeline";
 import type { ClarificationSession } from "@/lib/schedule/assistant/clarificationSession";
 import { assistantShadowModeEnabled } from "@/lib/schedule/assistant/assistantShadowMode";
+import {
+  assistantRouteHeartbeatMs,
+  assistantRouteSoftTimeoutMs,
+  enqueueAssistantSse,
+  sendAssistantInitialStatus,
+} from "@/app/api/schedule/assistant/assistantSse";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
+export const dynamic = "force-dynamic";
 
 function env(name: string): string | undefined {
   const v = process.env[name];
@@ -40,6 +47,21 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const requestStartedAt = Date.now();
+  const requestId =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `assistant-${requestStartedAt}-${Math.random().toString(36).slice(2)}`;
+  const logTiming = (phase: string, metadata: Record<string, unknown> = {}) => {
+    console.info("[assistant-route]", {
+      requestId,
+      phase,
+      elapsedMs: Date.now() - requestStartedAt,
+      ...metadata,
+    });
+  };
+  logTiming("request_received");
+
   const apiKey = env("OPENAI_API_KEY");
   if (!apiKey) {
     return NextResponse.json(
@@ -51,99 +73,149 @@ export async function POST(request: Request) {
     );
   }
 
-  let body: Body;
-  try {
-    body = (await request.json()) as Body;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-
-  const messages = Array.isArray(body.messages) ? body.messages : [];
-  const schedule = deserializeScheduleFromWire(body.schedule);
-  const timeZone =
-    body.timeZone?.trim() ||
-    (typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC");
-  const rawCid = body.competitionId;
-  const cid =
-    typeof rawCid === "number"
-      ? rawCid
-      : typeof rawCid === "string"
-        ? Number(rawCid)
-        : NaN;
-  const cidInt = Number.isFinite(cid) && cid > 0 ? Math.floor(cid) : undefined;
-
   const encoder = new TextEncoder();
-  function sseEvent(data: Record<string, unknown>): Uint8Array {
-    return encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
-  }
 
-  // Local fast path: return single SSE done event (no streaming needed).
-  const pipelineInput = {
-    messages,
-    schedule,
-    timeZone,
-    competitionName: body.competitionName,
-    competitionId: cidInt,
-    hitchkickPayload: body.hitchkickPayload,
-    lockedStudios: body.lockedStudios,
-    activeFilters: body.activeFilters,
-    activeEntryIds: body.activeEntryIds,
-    clarificationSession: body.clarificationSession,
-  };
-
-  // For AI path we stream chunks via callbacks; for local path pipeline returns immediately.
   const stream = new ReadableStream({
     async start(controller) {
+      let closed = false;
+      const safeEnqueue = (event: string, data: Record<string, unknown>) => {
+        if (closed) return false;
+        return enqueueAssistantSse(controller, event, data, encoder);
+      };
       const heartbeat = setInterval(() => {
-        try {
-          controller.enqueue(encoder.encode(": heartbeat\n\n"));
-        } catch {
-          /* closed */
-        }
-      }, 8_000);
+        safeEnqueue("heartbeat", {
+          time: new Date().toISOString(),
+        });
+      }, assistantRouteHeartbeatMs());
+      let timeout: ReturnType<typeof setTimeout> | undefined;
 
       try {
-        const result = await runAssistantPipeline(pipelineInput, {
+        await sendAssistantInitialStatus(controller, encoder, logTiming);
+
+        safeEnqueue("status", {
+          message: "Loading schedule context",
+          phase: "loading_schedule",
+        });
+
+        let body: Body;
+        try {
+          body = (await request.json()) as Body;
+        } catch {
+          safeEnqueue("error", { error: "Invalid JSON body" });
+          return;
+        }
+        logTiming("body_parsed");
+
+        const messages = Array.isArray(body.messages) ? body.messages : [];
+        const schedule = deserializeScheduleFromWire(body.schedule);
+        const timeZone =
+          body.timeZone?.trim() ||
+          (typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC");
+        const rawCid = body.competitionId;
+        const cid =
+          typeof rawCid === "number"
+            ? rawCid
+            : typeof rawCid === "string"
+              ? Number(rawCid)
+              : NaN;
+        const cidInt = Number.isFinite(cid) && cid > 0 ? Math.floor(cid) : undefined;
+        logTiming("schedule_loaded", {
+          scheduleRows: schedule.length,
+          messageCount: messages.length,
+          competitionId: cidInt,
+        });
+
+        const pipelineInput = {
+          messages,
+          schedule,
+          timeZone,
+          competitionName: body.competitionName,
+          competitionId: cidInt,
+          hitchkickPayload: body.hitchkickPayload,
+          lockedStudios: body.lockedStudios,
+          activeFilters: body.activeFilters,
+          activeEntryIds: body.activeEntryIds,
+          clarificationSession: body.clarificationSession,
+        };
+
+        const softTimeoutMs = assistantRouteSoftTimeoutMs();
+        const timeoutResult = Symbol("assistant-route-timeout");
+        const pipelinePromise = runAssistantPipeline(pipelineInput, {
           apiKey,
           callbacks: {
             onProgress: (label, detail) => {
-              controller.enqueue(sseEvent({ type: "progress", label, detail }));
+              safeEnqueue("progress", { label, detail });
             },
             onChunk: (content) => {
-              controller.enqueue(sseEvent({ type: "chunk", content }));
+              safeEnqueue("chunk", { content });
             },
           },
         });
+        const timeoutPromise = new Promise<typeof timeoutResult>((resolve) => {
+          timeout = setTimeout(() => resolve(timeoutResult), softTimeoutMs);
+        });
+        const result = await Promise.race([pipelinePromise, timeoutPromise]);
+
+        if (result === timeoutResult) {
+          logTiming("soft_timeout", { softTimeoutMs });
+          safeEnqueue("done", {
+            reply:
+              "I’m still working through this schedule, but the request took too long in production. Try narrowing the request by day, studio, or category.",
+            operations: [],
+            activeFilters: {},
+            filteredEntryIds: [],
+            querySource: "gate",
+            responseMs: Date.now() - requestStartedAt,
+            parseSource: "unsupported",
+            legacyPlannerUsed: false,
+            shadowMode: assistantShadowModeEnabled(),
+          });
+          return;
+        }
+        if (timeout) clearTimeout(timeout);
 
         if ("error" in result) {
-          controller.enqueue(sseEvent({ type: "error", error: result.error }));
-          controller.close();
+          safeEnqueue("error", { error: result.error });
           return;
         }
 
-        controller.enqueue(
-          sseEvent({
-            type: "done",
-            reply: result.reply,
-            operations: result.operations,
-            activeFilters: result.activeFilters,
-            filteredEntryIds: result.filteredEntryIds,
-            querySource: result.querySource,
-            responseMs: result.responseMs,
-            showcaseFulfillment: result.showcaseFulfillment,
-            schedulePatch: result.schedulePatch,
-            clarificationSession: result.clarificationSession,
-            commandType: result.commandType,
-            parseSource: result.parseSource,
-            legacyPlannerUsed: result.legacyPlannerUsed,
-            shadowMode: assistantShadowModeEnabled(),
-          })
-        );
+        logTiming("command_parsed", {
+          commandType: result.commandType,
+          parseSource: result.parseSource,
+          querySource: result.querySource,
+        });
+        if (result.schedulePatch) {
+          logTiming("patch_generated", {
+            changeCount: result.schedulePatch.changes.length,
+            blocked: result.schedulePatch.blocked,
+            warningCount: result.schedulePatch.warnings.length,
+          });
+        }
+
+        safeEnqueue("done", {
+          reply: result.reply,
+          operations: result.operations,
+          activeFilters: result.activeFilters,
+          filteredEntryIds: result.filteredEntryIds,
+          querySource: result.querySource,
+          responseMs: result.responseMs,
+          showcaseFulfillment: result.showcaseFulfillment,
+          schedulePatch: result.schedulePatch,
+          clarificationSession: result.clarificationSession,
+          commandType: result.commandType,
+          parseSource: result.parseSource,
+          legacyPlannerUsed: result.legacyPlannerUsed,
+          shadowMode: assistantShadowModeEnabled(),
+        });
+        logTiming("response_completed");
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Stream error";
-        controller.enqueue(sseEvent({ type: "error", error: msg }));
+        logTiming("stream_error", { error: msg });
+        safeEnqueue("error", { error: msg });
       } finally {
         clearInterval(heartbeat);
+        if (timeout) clearTimeout(timeout);
+        closed = true;
         controller.close();
       }
     },
@@ -151,9 +223,10 @@ export async function POST(request: Request) {
 
   return new Response(stream, {
     headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
     },
   });
 }
