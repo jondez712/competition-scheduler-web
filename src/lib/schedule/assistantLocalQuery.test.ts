@@ -239,3 +239,41 @@ describe("executeLocalQuery — list_all temporal filtering", () => {
     expect(result).toContain("#4");
   });
 });
+
+describe("executeLocalQuery — count scope copy", () => {
+  it("names the full-event studio scope", () => {
+    const result = executeLocalQuery(
+      { kind: "count" },
+      ROWS_UTC.slice(0, 3).map((r) => ({ ...r, studioName: "Larkin Dance Studio" })),
+      ROWS_UTC,
+      "UTC",
+      { "2026-03-01": "Sunday, March 1" },
+      { studioHints: ["Larkin Dance Studio"] },
+      "how many total routines do they have"
+    );
+
+    expect(result).toBe("Larkin Dance Studio has **3 routines** across the full event.");
+  });
+
+  it("names day scope across all stages when no stage filter is active", () => {
+    const rows = ROWS_UTC.slice(0, 2).map((r, index) => ({
+      ...r,
+      studioName: "Larkin Dance Studio",
+      stageNum: index + 1,
+      calendarDayKey: "2026-07-06",
+    }));
+    const result = executeLocalQuery(
+      { kind: "count" },
+      rows,
+      rows,
+      "UTC",
+      { "2026-07-06": "Monday, July 6" },
+      { studioHints: ["Larkin Dance Studio"], dayKeys: ["2026-07-06"] },
+      "how about on july 6"
+    );
+
+    expect(result).toBe(
+      "Larkin Dance Studio has **2 routines** on Monday, July 6 across all stages."
+    );
+  });
+});

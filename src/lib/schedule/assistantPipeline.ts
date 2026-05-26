@@ -27,6 +27,7 @@ import {
   hasAnyFilters,
   mergeFilters,
   parseQueryFilters,
+  resolveCountQueryScope,
   type ScheduleQueryFilters,
 } from "@/lib/schedule/assistantIntentFilter";
 import {
@@ -921,8 +922,19 @@ export async function runAssistantPipeline(
   const freshFilters = schedule.length
     ? parseQueryFilters(lastUserQuery, schedule, dayKeyToLabel)
     : {};
+  const earlyLocalIntent = classifyLocalQuery(lastUserQuery, freshFilters);
+  const readOnlyCountScope =
+    schedule.length && earlyLocalIntent?.kind === "count"
+      ? resolveCountQueryScope({
+          query: lastUserQuery,
+          carried: input.activeFilters,
+          fresh: freshFilters,
+        })
+      : null;
   let mergedFilters = mergeFilters(input.activeFilters, freshFilters, lastUserQuery);
-  if (schedule.length) {
+  if (readOnlyCountScope) {
+    mergedFilters = readOnlyCountScope.filters;
+  } else if (schedule.length) {
     const recoverMissingFilters = (query: string | undefined) => {
       if (!query) return;
       const parsed = parseQueryFilters(query, schedule, dayKeyToLabel);
@@ -1013,6 +1025,17 @@ export async function runAssistantPipeline(
     : { semanticRows: [], topologySummary: "", viewHint: "", totalRoutines: 0 };
 
   const reqStart = Date.now();
+  if (readOnlyCountScope?.needsStudioClarification) {
+    const responseMs = Date.now() - reqStart;
+    return {
+      reply: "Which studio should I count?",
+      operations: [],
+      querySource: "local",
+      activeFilters: mergedFilters,
+      filteredEntryIds,
+      responseMs,
+    };
+  }
   if (input.clarificationSession) {
     progress?.("Reading your follow-up", "Continuing the schedule edit we were clarifying.");
     const clarified = applyClarificationAnswer(input.clarificationSession, lastUserQuery, {
@@ -1152,7 +1175,7 @@ export async function runAssistantPipeline(
     }
   }
 
-  const localIntent = classifyLocalQuery(lastUserQuery, mergedFilters);
+  const localIntent = earlyLocalIntent ?? classifyLocalQuery(lastUserQuery, mergedFilters);
   if (localIntent && viewFocusedRows.length > 0) {
     progress?.("Checking for an instant answer", "This looks like a read-only schedule question.");
     const localRows = filterScheduleRows(schedule, mergedFilters);

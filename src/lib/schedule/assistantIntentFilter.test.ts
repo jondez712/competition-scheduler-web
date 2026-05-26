@@ -3,6 +3,7 @@ import {
   parseQueryFilters,
   buildDayKeyToLabel,
   mergeFilters,
+  resolveCountQueryScope,
 } from "@/lib/schedule/assistantIntentFilter";
 import type { ScheduledRoutine } from "@/lib/schedule/types";
 
@@ -312,5 +313,89 @@ describe("mergeFilters — follow-up context", () => {
 
     expect(merged.dayKeys).toEqual(["2026-07-05"]);
     expect(merged.stages).toEqual([4]);
+  });
+});
+
+describe("resolveCountQueryScope — count context carryover", () => {
+  const multiDaySchedule = [
+    row({
+      scheduleEntryId: "l1",
+      studioName: "Larkin Dance Studio",
+      stageNum: 4,
+      calendarDayKey: "2026-07-06",
+    }),
+    row({
+      scheduleEntryId: "l2",
+      studioName: "Larkin Dance Studio",
+      stageNum: 2,
+      calendarDayKey: "2026-07-06",
+    }),
+    row({
+      scheduleEntryId: "l3",
+      studioName: "Larkin Dance Studio",
+      stageNum: 4,
+      calendarDayKey: "2026-07-07",
+    }),
+    row({
+      scheduleEntryId: "o1",
+      studioName: "Other Studio",
+      stageNum: 4,
+      calendarDayKey: "2026-07-07",
+    }),
+  ];
+  const labels = buildDayKeyToLabel(multiDaySchedule, "UTC");
+  const carried = {
+    studioHints: ["Larkin Dance Studio"],
+    dayKeys: ["2026-07-07"],
+    stages: [4],
+  };
+  const resolve = (query: string) =>
+    resolveCountQueryScope({
+      query,
+      carried,
+      fresh: parseQueryFilters(query, multiDaySchedule, labels),
+    });
+
+  it("does not inherit stage/day for an explicit studio count", () => {
+    const result = resolve("how many routines does larkin dance studio have");
+    expect(result.filters.studioHints).toEqual(["Larkin Dance Studio"]);
+    expect(result.filters.dayKeys).toBeUndefined();
+    expect(result.filters.stages).toBeUndefined();
+  });
+
+  it("clears stage/day but keeps a safe studio pronoun for total counts", () => {
+    const result = resolve("how many total routines do they have");
+    expect(result.filters.studioHints).toEqual(["Larkin Dance Studio"]);
+    expect(result.filters.dayKeys).toBeUndefined();
+    expect(result.filters.stages).toBeUndefined();
+    expect(result.scope.scopeSource).toBe("cleared_by_user");
+  });
+
+  it("clears stage/day for whole-week wording", () => {
+    const result = resolve("how many routines does larkin dance studio have over the whole week");
+    expect(result.filters.studioHints).toEqual(["Larkin Dance Studio"]);
+    expect(result.filters.dayKeys).toBeUndefined();
+    expect(result.filters.stages).toBeUndefined();
+  });
+
+  it("uses a new day but does not inherit the previous stage", () => {
+    const result = resolve("how about on july 6");
+    expect(result.filters.studioHints).toEqual(["Larkin Dance Studio"]);
+    expect(result.filters.dayKeys).toEqual(["2026-07-06"]);
+    expect(result.filters.stages).toBeUndefined();
+  });
+
+  it("uses an explicit stage without silently keeping the previous day", () => {
+    const result = resolve("how about stage 4");
+    expect(result.filters.studioHints).toEqual(["Larkin Dance Studio"]);
+    expect(result.filters.stages).toEqual([4]);
+    expect(result.filters.dayKeys).toBeUndefined();
+  });
+
+  it("inherits stage only when the user asks for the same stage", () => {
+    const result = resolve("how many on the same stage");
+    expect(result.filters.studioHints).toEqual(["Larkin Dance Studio"]);
+    expect(result.filters.stages).toEqual([4]);
+    expect(result.filters.dayKeys).toBeUndefined();
   });
 });

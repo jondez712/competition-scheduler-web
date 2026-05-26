@@ -20,7 +20,7 @@ export type LocalQueryIntent =
 // ---------------------------------------------------------------------------
 
 const BLOCKLIST =
-  /\b(swap|exchange|reorder|optimize|improve|fix|better|flow|spread|evenly|conflict|avoid|suggest|rearrange|balance|distribute|should|could|would)\b/;
+  /\b(swap|exchange|move|moving|shift|place|put|reorder|optimize|improve|fix|better|flow|spread|evenly|conflict|avoid|suggest|rearrange|balance|distribute|should|could|would)\b/;
 
 const INTENT_PATTERNS: Array<{
   pattern: RegExp;
@@ -28,6 +28,10 @@ const INTENT_PATTERNS: Array<{
 }> = [
   {
     pattern: /\b(how many|count|total number of|number of)\b/,
+    intent: () => ({ kind: "count" }),
+  },
+  {
+    pattern: /\b(how about|what about)\b/,
     intent: () => ({ kind: "count" }),
   },
   {
@@ -188,6 +192,33 @@ function describeActiveFilters(filters: ScheduleQueryFilters): string {
   return parts.join(", ");
 }
 
+function countSubject(filters: ScheduleQueryFilters, total: number): string {
+  const studio = filters.studioHints?.length === 1 ? filters.studioHints[0] : undefined;
+  if (studio) return `${studio} has **${total} routine${total !== 1 ? "s" : ""}**`;
+
+  const qualifier = describeActiveFilters(filters);
+  return qualifier
+    ? `There are **${total} ${qualifier} routine${total !== 1 ? "s" : ""}**`
+    : `There are **${total} routine${total !== 1 ? "s" : ""}**`;
+}
+
+function countScopeText(
+  filters: ScheduleQueryFilters,
+  dayKeyToLabel: Record<string, string>
+): string {
+  const day =
+    filters.dayKeys?.length === 1
+      ? dayKeyToLabel[filters.dayKeys[0]!] ?? filters.dayKeys[0]!
+      : undefined;
+  const stage =
+    filters.stages?.length === 1 ? `Stage ${filters.stages[0]}` : undefined;
+
+  if (day && stage) return `on ${day}, ${stage}`;
+  if (day) return `on ${day} across all stages`;
+  if (stage) return `on ${stage} across the full event`;
+  return "across the full event";
+}
+
 // ---------------------------------------------------------------------------
 // Executor helpers
 // ---------------------------------------------------------------------------
@@ -198,44 +229,17 @@ function formatCount(
   dayKeyToLabel: Record<string, string>
 ): string {
   const total = rows.length;
-  const qualifier = describeActiveFilters(filters);
-  const noun = qualifier
-    ? `**${total} ${qualifier} routine${total !== 1 ? "s" : ""}**`
-    : `**${total} routine${total !== 1 ? "s" : ""}**`;
+  const subject = countSubject(filters, total);
+  const scope = countScopeText(filters, dayKeyToLabel);
 
   if (total === 0) {
+    const qualifier = describeActiveFilters(filters);
     return qualifier
-      ? `No ${qualifier} routines found matching your criteria.`
-      : "No routines found matching your criteria.";
+      ? `No ${qualifier} routines found ${scope}.`
+      : `No routines found ${scope}.`;
   }
 
-  // If a single stage is filtered, no need for breakdown
-  if (filters.stages?.length === 1) {
-    const day =
-      filters.dayKeys?.length === 1
-        ? ` on ${dayKeyToLabel[filters.dayKeys[0]!] ?? filters.dayKeys[0]}`
-        : "";
-    return `There are ${noun} on Stage ${filters.stages[0]}${day}.`;
-  }
-
-  // Per-stage breakdown when no stage filter
-  if (!filters.stages?.length) {
-    const byStageCounts: Record<number, number> = {};
-    for (const r of rows) {
-      byStageCounts[r.stageNum] = (byStageCounts[r.stageNum] ?? 0) + 1;
-    }
-    const stageLines = Object.entries(byStageCounts)
-      .sort(([a], [b]) => Number(a) - Number(b))
-      .map(([stage, count]) => `  • Stage ${stage}: ${count}`)
-      .join("\n");
-    const context =
-      filters.dayKeys?.length === 1
-        ? ` on ${dayKeyToLabel[filters.dayKeys[0]!] ?? filters.dayKeys[0]}`
-        : "";
-    return `There are ${noun}${context} across all stages:\n${stageLines}`;
-  }
-
-  return `There are ${noun} matching your criteria.`;
+  return `${subject} ${scope}.`;
 }
 
 function formatFirst(

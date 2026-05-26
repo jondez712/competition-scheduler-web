@@ -14,6 +14,16 @@ export type ScheduleQueryFilters = {
   categoryHints?: string[];
 };
 
+export type QueryScope = {
+  studioId?: string;
+  studioName?: string;
+  day?: string;
+  stageId?: string;
+  stageName?: string;
+  categoryQuery?: string;
+  scopeSource: "explicit" | "conversation_context" | "active_filter" | "cleared_by_user";
+};
+
 // ---------------------------------------------------------------------------
 // Broad-reset detection
 // ---------------------------------------------------------------------------
@@ -312,6 +322,154 @@ export function mergeFilters(
     divisionHints: fresh.divisionHints ?? carried.divisionHints,
     studioHints: fresh.studioHints ?? carried.studioHints,
     categoryHints: fresh.categoryHints ?? carried.categoryHints,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Read-only count query scope
+// ---------------------------------------------------------------------------
+
+const COUNT_SCOPE_RESET =
+  /\b(total|overall|whole week|entire week|all week|in the whole competition|in the event|all routines|how many total)\b/i;
+
+const STAGE_INHERITANCE_REFERENCE =
+  /\b(same stage|on that stage|that stage|there|current stage|selected stage)\b/i;
+
+const DAY_INHERITANCE_REFERENCE =
+  /\b(same day|on that day|that day|current day|selected day)\b/i;
+
+const ACTIVE_FILTER_REFERENCE =
+  /\b(visible|currently visible|current filter|current filters|filtered|selected)\b/i;
+
+const STUDIO_CONTEXT_REFERENCE =
+  /\b(they|them|their|that studio|same studio|those routines|these routines|how about|what about)\b/i;
+
+function one<T>(values: T[] | undefined): T | undefined {
+  return values?.length === 1 ? values[0] : undefined;
+}
+
+function scopeIdFromName(prefix: string, name: string): string {
+  return `${prefix}:${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+}
+
+function hasExplicitStageSignal(query: string): boolean {
+  return extractStageNumbers(query).length > 0;
+}
+
+function hasExplicitStudioSignal(fresh: ScheduleQueryFilters): boolean {
+  return (fresh.studioHints?.length ?? 0) > 0;
+}
+
+function hasExplicitDaySignal(fresh: ScheduleQueryFilters): boolean {
+  return (fresh.dayKeys?.length ?? 0) > 0;
+}
+
+export function hasCountScopeResetPhrase(query: string): boolean {
+  return COUNT_SCOPE_RESET.test(query);
+}
+
+/**
+ * Resolve filters for read-only count questions without letting mutation scope
+ * leak in. Studio pronouns may inherit a clear recent studio, but stage/day are
+ * inherited only when the user explicitly references that prior scope.
+ */
+export function resolveCountQueryScope(params: {
+  query: string;
+  carried?: ScheduleQueryFilters | null;
+  fresh: ScheduleQueryFilters;
+}): { filters: ScheduleQueryFilters; scope: QueryScope; needsStudioClarification: boolean } {
+  const { query, carried, fresh } = params;
+  const reset = hasCountScopeResetPhrase(query);
+  const activeFilterReference = ACTIVE_FILTER_REFERENCE.test(query);
+  const explicitStage = hasExplicitStageSignal(query);
+  const explicitDay = hasExplicitDaySignal(fresh);
+  const explicitStudio = hasExplicitStudioSignal(fresh);
+
+  if (activeFilterReference && carried && hasAnyFilters(carried)) {
+    const filters = mergeFilters(carried, fresh, query);
+    return {
+      filters,
+      scope: {
+        studioName: one(filters.studioHints),
+        studioId: one(filters.studioHints) ? scopeIdFromName("studio", one(filters.studioHints)!) : undefined,
+        day: one(filters.dayKeys),
+        stageName: one(filters.stages) ? `Stage ${one(filters.stages)}` : undefined,
+        stageId: one(filters.stages) ? `stage-${one(filters.stages)}` : undefined,
+        categoryQuery: one(filters.categoryHints),
+        scopeSource: "active_filter",
+      },
+      needsStudioClarification: false,
+    };
+  }
+
+  const filters: ScheduleQueryFilters = {};
+  const carriedStudio = one(carried?.studioHints);
+  const referencesPriorStudio = STUDIO_CONTEXT_REFERENCE.test(query);
+  const shouldCarryStudio =
+    !explicitStudio &&
+    !!carriedStudio &&
+    (referencesPriorStudio || explicitDay || explicitStage || STAGE_INHERITANCE_REFERENCE.test(query));
+
+  if (explicitStudio && fresh.studioHints) {
+    filters.studioHints = fresh.studioHints;
+  } else if (shouldCarryStudio) {
+    filters.studioHints = [carriedStudio];
+  }
+
+  if (fresh.levelHints?.length) filters.levelHints = fresh.levelHints;
+  else if (!reset && carried?.levelHints?.length && CONTEXT_ANCHORS.test(query.toLowerCase())) {
+    filters.levelHints = carried.levelHints;
+  }
+
+  if (fresh.divisionHints?.length) filters.divisionHints = fresh.divisionHints;
+  else if (!reset && carried?.divisionHints?.length && CONTEXT_ANCHORS.test(query.toLowerCase())) {
+    filters.divisionHints = carried.divisionHints;
+  }
+
+  if (fresh.categoryHints?.length) filters.categoryHints = fresh.categoryHints;
+  else if (!reset && carried?.categoryHints?.length && CONTEXT_ANCHORS.test(query.toLowerCase())) {
+    filters.categoryHints = carried.categoryHints;
+  }
+
+  if (fresh.dayKeys?.length) {
+    filters.dayKeys = fresh.dayKeys;
+  } else if (!reset && DAY_INHERITANCE_REFERENCE.test(query) && carried?.dayKeys?.length) {
+    filters.dayKeys = carried.dayKeys;
+  }
+
+  if (fresh.stages?.length) {
+    filters.stages = fresh.stages;
+  } else if (!reset && STAGE_INHERITANCE_REFERENCE.test(query) && carried?.stages?.length) {
+    filters.stages = carried.stages;
+  }
+
+  const needsStudioClarification =
+    /\b(they|them|their|that studio|same studio)\b/i.test(query) &&
+    !filters.studioHints?.length;
+
+  const source: QueryScope["scopeSource"] =
+    reset
+      ? "cleared_by_user"
+      : explicitStudio || explicitDay || explicitStage || fresh.levelHints?.length || fresh.divisionHints?.length || fresh.categoryHints?.length
+        ? "explicit"
+        : shouldCarryStudio || filters.stages?.length || filters.dayKeys?.length
+          ? "conversation_context"
+          : "explicit";
+
+  const studioName = one(filters.studioHints);
+  const stageNum = one(filters.stages);
+  return {
+    filters,
+    scope: {
+      studioName,
+      studioId: studioName ? scopeIdFromName("studio", studioName) : undefined,
+      day: one(filters.dayKeys),
+      stageName: stageNum ? `Stage ${stageNum}` : undefined,
+      stageId: stageNum ? `stage-${stageNum}` : undefined,
+      categoryQuery: one(filters.categoryHints),
+      scopeSource: source,
+    },
+    needsStudioClarification,
   };
 }
 

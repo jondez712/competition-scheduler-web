@@ -173,6 +173,83 @@ describe("completeStudioFrontLoadDayClarification", () => {
   });
 });
 
+describe("runAssistantPipeline — read-only count scope", () => {
+  function scopedRoutine(
+    id: string,
+    studioName: string,
+    day: string,
+    stageNum: number,
+    minute: number
+  ): ScheduledRoutine {
+    return {
+      ...routine(id, studioName, `${studioName} ${id}`, minute),
+      calendarDayKey: day,
+      stageNum,
+    };
+  }
+
+  const schedule = [
+    scopedRoutine("l1", "Larkin Dance Studio", "2026-07-06", 1, 0),
+    scopedRoutine("l2", "Larkin Dance Studio", "2026-07-06", 4, 4),
+    scopedRoutine("l3", "Larkin Dance Studio", "2026-07-07", 4, 8),
+    scopedRoutine("l4", "Larkin Dance Studio", "2026-07-07", 2, 12),
+    scopedRoutine("o1", "Other Studio", "2026-07-07", 4, 16),
+  ];
+
+  const priorScope = {
+    studioHints: ["Larkin Dance Studio"],
+    dayKeys: ["2026-07-07"],
+    stages: [4],
+  };
+
+  it("clears prior stage/day when the user asks for total routines", async () => {
+    const result = await runAssistantPipeline(
+      {
+        messages: [
+          { role: "user", content: "move larkin dance studio on stage 4 july 7" },
+          { role: "assistant", content: "Network error." },
+          { role: "user", content: "how many total routines do they have" },
+        ],
+        schedule,
+        timeZone: "UTC",
+        activeFilters: priorScope,
+      },
+      { apiKey: "test" }
+    );
+
+    expect("error" in result).toBe(false);
+    if ("error" in result) return;
+    expect(result.reply).toContain("Larkin Dance Studio has **4 routines** across the full event.");
+    expect(result.activeFilters).toEqual({ studioHints: ["Larkin Dance Studio"] });
+  });
+
+  it("uses a day override across all stages instead of inheriting Stage 4", async () => {
+    const result = await runAssistantPipeline(
+      {
+        messages: [
+          { role: "user", content: "move larkin dance studio on stage 4 july 7" },
+          { role: "assistant", content: "Network error." },
+          { role: "user", content: "how about on july 6" },
+        ],
+        schedule,
+        timeZone: "UTC",
+        activeFilters: priorScope,
+      },
+      { apiKey: "test" }
+    );
+
+    expect("error" in result).toBe(false);
+    if ("error" in result) return;
+    expect(result.reply).toContain(
+      "Larkin Dance Studio has **2 routines** on Monday, July 6 across all stages."
+    );
+    expect(result.activeFilters).toEqual({
+      studioHints: ["Larkin Dance Studio"],
+      dayKeys: ["2026-07-06"],
+    });
+  });
+});
+
 describe("runAssistantPipeline front-load context recovery", () => {
   it("uses the exact studio name when stage words could match other studio names", async () => {
     const schedule = [
