@@ -72,11 +72,62 @@ npm run deploy:netlify   # after `npx netlify-cli login` + `npx netlify-cli init
    - `HITCHKICK_PROXY_BASE` — your proxy base URL (no trailing slash).
    - Optional: `HITCHKICK_DIRECT_BASE`, `HITCHKICK_API_KEY` if you use direct Hitchkick fallback.
    - Optional AI: `OPENAI_API_KEY` plus any assistant/draft tuning vars you use in production (names are documented in code under `src/lib/openaiAssistantEnvKeys.ts` and `src/lib/schedule/aiSchedule.ts`).  
-   - Assistant transport: `netlify.toml` sets `SCHEDULE_ASSISTANT_STREAMING_ENABLED=false` so Netlify production uses normal JSON responses instead of SSE streaming for long assistant prompts.
    Use **Scopes:** at least **Production**; add **Deploy Previews** if you want previews to work the same way.
 5. **Deploy site**. Open the production URL; try **`/competition/7`** (or another id from `src/lib/competitions.ts`). If the schedule API returns errors, check the deploy **Functions** logs and confirm env vars are set (no typos, values match local).
 
 **CLI alternative:** from the repo root, `npx netlify-cli login` then `npx netlify-cli init` to link an existing site or create one; env vars are still easiest to manage in the dashboard.
+
+## AWS Lambda assistant backend
+
+Heavy assistant requests can run outside Netlify while the frontend stays on Netlify. Build the Lambda Function URL handler with:
+
+```bash
+npm run build:lambda
+npm run zip:lambda
+```
+
+Deploy `dist/lambda/scheduleAssistantHandler.zip` to AWS Lambda using Node.js 20.x or 22.x, 1024-2048 MB memory, and a 60-120 second timeout. Use a Lambda Function URL first; set auth to `NONE` for the first internal test or put your own lightweight auth in front of it later. Configure Function URL CORS with the same origins, headers, and methods as the Lambda response headers.
+
+Set these frontend env vars in Netlify, then redeploy because `NEXT_PUBLIC_*` values are build-time:
+
+```bash
+NEXT_PUBLIC_ASSISTANT_API_URL=https://your-lambda-function-url-or-api-domain
+NEXT_PUBLIC_SCHEDULE_ASSISTANT_SHADOW_MODE=true
+```
+
+Set these backend env vars on the Lambda:
+
+```bash
+ASSISTANT_ALLOWED_ORIGINS=https://your-netlify-site.netlify.app,http://localhost:3000
+SCHEDULE_ASSISTANT_SHADOW_MODE=true
+SCHEDULE_ASSISTANT_LEGACY_PLANNER_ENABLED=0
+SCHEDULE_ASSISTANT_STREAMING_ENABLED=false
+OPENAI_API_KEY=...
+```
+
+Also copy any Hitchkick/schedule env vars the assistant needs, such as `HITCHKICK_DIRECT_BASE`, `HITCHKICK_API_KEY`, or assistant model overrides from `src/lib/openaiAssistantEnvKeys.ts`.
+
+Manual smoke checks:
+
+```bash
+curl -i -X OPTIONS "$ASSISTANT_URL/api/schedule/assistant" \
+  -H "Origin: https://your-netlify-site.netlify.app" \
+  -H "Access-Control-Request-Method: POST"
+
+curl -i -X POST "$ASSISTANT_URL/api/schedule/assistant" \
+  -H "Origin: https://your-netlify-site.netlify.app" \
+  -H "Content-Type: application/json" \
+  --data '{"messages":[{"role":"user","content":"How many routines are there"}],"schedule":[{"scheduleEntryId":"smoke-1","routineNumber":"1","routineTitle":"Smoke Test","stageNum":1,"calendarDayKey":"2026-07-07","start":"2026-07-07T15:00:00.000Z","end":"2026-07-07T15:04:00.000Z","studioName":"Larkin Dance Studio","levelName":"Junior","divisionName":"Solo","categoryName":"Jazz"}],"timeZone":"UTC"}'
+
+curl -i -X POST "$ASSISTANT_URL/api/schedule/assistant" \
+  -H "Origin: https://your-netlify-site.netlify.app" \
+  -H "Content-Type: application/json" \
+  --data @larkin-assistant-payload.json
+```
+
+Use the real page payload for `larkin-assistant-payload.json` so the long `OPTIMIZE_STUDIO_WINDOWS` request includes the full schedule context. For production, verify the browser posts to the Lambda URL for: `How many routines are there`, `analyze conflicts for july 7`, and the long Larkin prompt. Expected: no Netlify `/api/schedule/assistant` POST, no Netlify 504/HTTP2 error, and no real schedule apply unless the user confirms.
+
+TODO for SSE later: use Lambda Function URL response streaming with `awslambda.streamifyResponse`. Do not route assistant SSE through Netlify Functions, and do not rely on API Gateway HTTP API for progressive SSE.
 
 ## Architecture notes
 

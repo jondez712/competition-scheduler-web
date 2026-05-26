@@ -3,6 +3,7 @@ import {
   assistantConnectionInterruptedMessage,
   assistantJsonEnvelopeToTransportEvent,
   assistantResponseTransport,
+  scheduleAssistantRequestUrl,
 } from "@/lib/schedule/assistant/assistantResponseTransport";
 
 describe("assistant response transport", () => {
@@ -25,31 +26,38 @@ describe("assistant response transport", () => {
     );
   });
 
-  it("normalizes production JSON envelopes into completed assistant events", () => {
-    expect(
-      assistantJsonEnvelopeToTransportEvent({
-        ok: true,
-        messages: [{ role: "assistant", content: "Done." }],
-        assistantOperations: [{ op: "swap_by_entry_id" }],
-      })
-    ).toMatchObject({
-      type: "done",
-      reply: "Done.",
-      operations: [{ op: "swap_by_entry_id" }],
+  it("uses the Lambda assistant base URL when configured", () => {
+    expect(scheduleAssistantRequestUrl("https://abc.lambda-url.us-west-2.on.aws/")).toBe(
+      "https://abc.lambda-url.us-west-2.on.aws/api/schedule/assistant"
+    );
+  });
+
+  it("falls back to the local assistant route when no backend URL is configured", () => {
+    expect(scheduleAssistantRequestUrl("")).toBe("/api/schedule/assistant");
+    expect(scheduleAssistantRequestUrl(undefined)).toBe("/api/schedule/assistant");
+  });
+
+  it("normalizes JSON assistant envelopes into transport events", () => {
+    const evt = assistantJsonEnvelopeToTransportEvent({
+      ok: true,
+      messages: [{ role: "assistant", content: "Done" }],
+      assistantOperations: [{ op: "swap_by_entry_id" }],
     });
+
+    expect(evt.type).toBe("done");
+    expect(evt.reply).toBe("Done");
+    expect(evt.operations).toEqual([{ op: "swap_by_entry_id" }]);
   });
 
   it("normalizes error JSON envelopes into clean assistant messages", () => {
-    expect(
-      assistantJsonEnvelopeToTransportEvent({
-        ok: false,
-        messages: [{ role: "assistant", content: "Try narrowing the request." }],
-        error: { code: "ASSISTANT_REQUEST_FAILED", message: "sanitized" },
-      })
-    ).toMatchObject({
-      type: "done",
-      reply: "Try narrowing the request.",
-      operations: [],
+    const evt = assistantJsonEnvelopeToTransportEvent({
+      ok: false,
+      messages: [{ role: "assistant", content: "Try narrowing the request." }],
+      error: { code: "ASSISTANT_REQUEST_FAILED", message: "sanitized" },
     });
+
+    expect(evt.type).toBe("done");
+    expect(evt.reply).toBe("Try narrowing the request.");
+    expect(evt.operations).toEqual([]);
   });
 });

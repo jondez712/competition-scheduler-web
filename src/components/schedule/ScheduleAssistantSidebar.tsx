@@ -37,9 +37,12 @@ import {
   assistantShadowModeEnabled,
 } from "@/lib/schedule/assistant/assistantShadowMode";
 import {
+  ASSISTANT_BACKEND_UNAVAILABLE_MESSAGE,
   assistantConnectionInterruptedMessage,
   assistantJsonEnvelopeToTransportEvent,
   assistantResponseTransport,
+  scheduleAssistantRequestUrl,
+  usesExternalAssistantBackend,
 } from "@/lib/schedule/assistant/assistantResponseTransport";
 import {
   recordAssistantEvent,
@@ -385,7 +388,9 @@ export function ScheduleAssistantSidebar({
         return;
       }
 
-      const res = await fetch("/api/schedule/assistant", {
+      const assistantUrl = scheduleAssistantRequestUrl();
+      const externalAssistantBackend = usesExternalAssistantBackend(assistantUrl);
+      const res = await fetch(assistantUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: bodyStr,
@@ -393,31 +398,32 @@ export function ScheduleAssistantSidebar({
 
       if (!res.ok || !res.body) {
         const rawRes = res.body ? await res.text().catch(() => "") : "";
-        let errMsg = `Request failed (${res.status})`;
-        let errMsgFromAssistant = false;
-        try {
-          const parsed = JSON.parse(rawRes) as {
-            error?: string | { message?: string };
-            messages?: Array<{ role?: string; content?: string }>;
-          };
-          const assistantMessage = parsed.messages?.find(
-            (message) => message.role === "assistant" && message.content
-          )?.content;
-          if (assistantMessage) {
-            errMsg = assistantMessage;
-            errMsgFromAssistant = true;
-          } else if (typeof parsed.error === "string") errMsg = parsed.error;
-          else if (parsed.error?.message) errMsg = parsed.error.message;
-        } catch {
-          const plain = rawRes.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
-          if (plain) errMsg = `Request failed (${res.status}): ${plain}`;
+        let errMsg = externalAssistantBackend
+          ? ASSISTANT_BACKEND_UNAVAILABLE_MESSAGE
+          : `Request failed (${res.status})`;
+        if (!externalAssistantBackend) {
+          try {
+            const parsed = JSON.parse(rawRes) as {
+              error?: string | { message?: string };
+              messages?: Array<{ role?: string; content?: string }>;
+            };
+            const assistantMessage = parsed.messages?.find(
+              (message) => message.role === "assistant" && message.content
+            )?.content;
+            if (assistantMessage) errMsg = assistantMessage;
+            else if (typeof parsed.error === "string") errMsg = parsed.error;
+            else if (parsed.error?.message) errMsg = parsed.error.message;
+          } catch {
+            const plain = rawRes.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+            if (plain) errMsg = `Request failed (${res.status}): ${plain}`;
+          }
         }
         setLastError(errMsg);
         setMessages((m) => [
           ...m,
           {
             role: "assistant",
-            content: errMsgFromAssistant ? errMsg : assistantFailureBubble(res.status, errMsg),
+            content: externalAssistantBackend ? errMsg : assistantFailureBubble(res.status, errMsg),
           },
         ]);
         return;
@@ -684,11 +690,19 @@ export function ScheduleAssistantSidebar({
         ]);
       }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "Network error";
+      const externalAssistantBackend = usesExternalAssistantBackend(scheduleAssistantRequestUrl());
+      const msg = externalAssistantBackend
+        ? ASSISTANT_BACKEND_UNAVAILABLE_MESSAGE
+        : e instanceof Error
+          ? e.message
+          : "Network error";
       setLastError(msg);
       setMessages((m) => [
         ...m,
-        { role: "assistant", content: assistantConnectionInterruptedMessage(msg) },
+        {
+          role: "assistant",
+          content: externalAssistantBackend ? msg : assistantConnectionInterruptedMessage(msg),
+        },
       ]);
     } finally {
       setLoading(false);

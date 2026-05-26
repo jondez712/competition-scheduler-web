@@ -11,6 +11,10 @@ export type AssistantJsonEnvelope = {
   [key: string]: unknown;
 };
 
+export const SCHEDULE_ASSISTANT_ROUTE_PATH = "/api/schedule/assistant";
+export const ASSISTANT_BACKEND_UNAVAILABLE_MESSAGE =
+  "I couldn’t reach the assistant backend. Please try again.";
+
 export function assistantResponseTransport(contentType: string | null | undefined): AssistantResponseTransport {
   const normalized = (contentType ?? "").toLowerCase();
   return normalized.includes("application/json") ? "json" : "sse";
@@ -19,6 +23,17 @@ export function assistantResponseTransport(contentType: string | null | undefine
 export function assistantConnectionInterruptedMessage(errorMessage: string | undefined): string {
   const detail = errorMessage?.trim();
   return `The assistant connection was interrupted. ${detail ? `(${detail}) ` : ""}Please try again.`;
+}
+
+export function scheduleAssistantRequestUrl(
+  baseUrl: string | undefined = process.env.NEXT_PUBLIC_ASSISTANT_API_URL
+): string {
+  const base = baseUrl?.trim().replace(/\/+$/, "");
+  return base ? `${base}${SCHEDULE_ASSISTANT_ROUTE_PATH}` : SCHEDULE_ASSISTANT_ROUTE_PATH;
+}
+
+export function usesExternalAssistantBackend(url: string): boolean {
+  return url !== SCHEDULE_ASSISTANT_ROUTE_PATH;
 }
 
 function firstAssistantMessage(json: AssistantJsonEnvelope): string | undefined {
