@@ -44,9 +44,10 @@ describe("assistant SSE helpers", () => {
     expect(assistantRouteSoftTimeoutMs({ SCHEDULE_ASSISTANT_ROUTE_SOFT_TIMEOUT_MS: "45000" })).toBe(45_000);
   });
 
-  it("uses JSON on Netlify/production by default and allows explicit streaming", () => {
+  it("uses JSON by default and allows explicit streaming", () => {
     expect(assistantRouteStreamingEnabled({ NETLIFY: "true" })).toBe(false);
     expect(assistantRouteStreamingEnabled({ CONTEXT: "production" })).toBe(false);
+    expect(assistantRouteStreamingEnabled({})).toBe(false);
     expect(
       assistantRouteStreamingEnabled({
         NETLIFY: "true",
@@ -59,6 +60,5 @@ describe("assistant SSE helpers", () => {
         SCHEDULE_ASSISTANT_STREAMING_ENABLED: "false",
       })
     ).toBe(false);
-    expect(assistantRouteStreamingEnabled({})).toBe(true);
   });
 });

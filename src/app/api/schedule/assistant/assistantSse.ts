@@ -62,8 +62,7 @@ export function assistantRouteStreamingEnabled(
   const explicit = env?.SCHEDULE_ASSISTANT_STREAMING_ENABLED;
   if (boolEnv(explicit)) return true;
   if (explicitFalseEnv(explicit)) return false;
-  if (boolEnv(env?.NETLIFY) || env?.CONTEXT === "production") return false;
-  return true;
+  return false;
 }
 
 export function flushAssistantSseTick(): Promise<void> {
