@@ -61,13 +61,7 @@ export function assistantRouteStreamingEnabled(
   const explicit = env?.SCHEDULE_ASSISTANT_STREAMING_ENABLED;
   if (boolEnv(explicit)) return true;
   if (explicitFalseEnv(explicit)) return false;
-  const isNetlify =
-    env?.NETLIFY === "true" ||
-    Boolean(env?.CONTEXT) ||
-    Boolean(env?.DEPLOY_PRIME_URL?.includes("netlify.app")) ||
-    Boolean(env?.DEPLOY_URL?.includes("netlify.app")) ||
-    Boolean(env?.URL?.includes("netlify.app"));
-  return !isNetlify;
+  return true;
 }
 
 export function flushAssistantSseTick(): Promise<void> {

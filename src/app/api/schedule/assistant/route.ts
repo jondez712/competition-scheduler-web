@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { ScheduleQueryFilters } from "@/lib/schedule/assistantIntentFilter";
 import {
+  type AssistantPipelineInput,
   deserializeScheduleFromWire,
   runAssistantPipeline,
   type AssistantChatMessage,
@@ -115,15 +116,15 @@ export async function POST(request: Request) {
   }
 
   const streamingEnabled = assistantRouteStreamingEnabled();
-  if (!streamingEnabled) {
-    let body: Body;
-    try {
-      body = (await request.json()) as Body;
-    } catch {
-      return NextResponse.json({ type: "error", error: "Invalid JSON body" }, { status: 400 });
-    }
-    logTiming("body_parsed", { transport: "json" });
+  let body: Body;
+  try {
+    body = (await request.json()) as Body;
+  } catch {
+    return NextResponse.json({ type: "error", error: "Invalid JSON body" }, { status: 400 });
+  }
+  logTiming("body_parsed", { transport: streamingEnabled ? "sse" : "json" });
 
+  const buildPipelineInput = (transport: "sse" | "json"): AssistantPipelineInput => {
     const messages = Array.isArray(body.messages) ? body.messages : [];
     const schedule = deserializeScheduleFromWire(body.schedule);
     const timeZone =
@@ -138,13 +139,12 @@ export async function POST(request: Request) {
           : NaN;
     const cidInt = Number.isFinite(cid) && cid > 0 ? Math.floor(cid) : undefined;
     logTiming("schedule_loaded", {
-      transport: "json",
+      transport,
       scheduleRows: schedule.length,
       messageCount: messages.length,
       competitionId: cidInt,
     });
-
-    const pipelineInput = {
+    return {
       messages,
       schedule,
       timeZone,
@@ -156,6 +156,10 @@ export async function POST(request: Request) {
       activeEntryIds: body.activeEntryIds,
       clarificationSession: body.clarificationSession,
     };
+  };
+
+  if (!streamingEnabled) {
+    const pipelineInput = buildPipelineInput("json");
     const softTimeoutMs = assistantRouteSoftTimeoutMs();
     const timeoutResult = Symbol("assistant-route-timeout");
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -222,46 +226,7 @@ export async function POST(request: Request) {
           phase: "loading_schedule",
         });
 
-        let body: Body;
-        try {
-          body = (await request.json()) as Body;
-        } catch {
-          safeEnqueue("error", { error: "Invalid JSON body" });
-          return;
-        }
-        logTiming("body_parsed");
-
-        const messages = Array.isArray(body.messages) ? body.messages : [];
-        const schedule = deserializeScheduleFromWire(body.schedule);
-        const timeZone =
-          body.timeZone?.trim() ||
-          (typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC");
-        const rawCid = body.competitionId;
-        const cid =
-          typeof rawCid === "number"
-            ? rawCid
-            : typeof rawCid === "string"
-              ? Number(rawCid)
-              : NaN;
-        const cidInt = Number.isFinite(cid) && cid > 0 ? Math.floor(cid) : undefined;
-        logTiming("schedule_loaded", {
-          scheduleRows: schedule.length,
-          messageCount: messages.length,
-          competitionId: cidInt,
-        });
-
-        const pipelineInput = {
-          messages,
-          schedule,
-          timeZone,
-          competitionName: body.competitionName,
-          competitionId: cidInt,
-          hitchkickPayload: body.hitchkickPayload,
-          lockedStudios: body.lockedStudios,
-          activeFilters: body.activeFilters,
-          activeEntryIds: body.activeEntryIds,
-          clarificationSession: body.clarificationSession,
-        };
+        const pipelineInput = buildPipelineInput("sse");
 
         const softTimeoutMs = assistantRouteSoftTimeoutMs();
         const timeoutResult = Symbol("assistant-route-timeout");
