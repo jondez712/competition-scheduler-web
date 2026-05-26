@@ -46,6 +46,30 @@ export function assistantRouteHeartbeatMs(
   return 5_000;
 }
 
+function boolEnv(value: string | undefined): boolean {
+  return value === "1" || value?.toLowerCase() === "true" || value?.toLowerCase() === "yes";
+}
+
+function explicitFalseEnv(value: string | undefined): boolean {
+  return value === "0" || value?.toLowerCase() === "false" || value?.toLowerCase() === "no";
+}
+
+export function assistantRouteStreamingEnabled(
+  env: Record<string, string | undefined> | undefined =
+    typeof process !== "undefined" ? process.env : undefined
+): boolean {
+  const explicit = env?.SCHEDULE_ASSISTANT_STREAMING_ENABLED;
+  if (boolEnv(explicit)) return true;
+  if (explicitFalseEnv(explicit)) return false;
+  const isNetlify =
+    env?.NETLIFY === "true" ||
+    Boolean(env?.CONTEXT) ||
+    Boolean(env?.DEPLOY_PRIME_URL?.includes("netlify.app")) ||
+    Boolean(env?.DEPLOY_URL?.includes("netlify.app")) ||
+    Boolean(env?.URL?.includes("netlify.app"));
+  return !isNetlify;
+}
+
 export function flushAssistantSseTick(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }

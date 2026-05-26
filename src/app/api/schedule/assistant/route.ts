@@ -10,6 +10,7 @@ import type { ClarificationSession } from "@/lib/schedule/assistant/clarificatio
 import { assistantShadowModeEnabled } from "@/lib/schedule/assistant/assistantShadowMode";
 import {
   assistantRouteHeartbeatMs,
+  assistantRouteStreamingEnabled,
   assistantRouteSoftTimeoutMs,
   enqueueAssistantSse,
   sendAssistantInitialStatus,
@@ -37,13 +38,53 @@ type Body = {
   clarificationSession?: ClarificationSession;
 };
 
+type AssistantRouteDonePayload = Record<string, unknown>;
+
 export async function GET() {
   return NextResponse.json({
     shadowMode: assistantShadowModeEnabled(),
+    streamingEnabled: assistantRouteStreamingEnabled(),
     legacyPlannerEnabled:
       env("SCHEDULE_ASSISTANT_LEGACY_PLANNER_ENABLED") === "1" ||
       env("SCHEDULE_ASSISTANT_LEGACY_PLANNER_ENABLED")?.toLowerCase() === "true",
   });
+}
+
+function timeoutDonePayload(requestStartedAt: number): AssistantRouteDonePayload {
+  return {
+    type: "done",
+    reply:
+      "I’m still working through this schedule, but the request took too long in production. Try narrowing the request by day, studio, or category.",
+    operations: [],
+    activeFilters: {},
+    filteredEntryIds: [],
+    querySource: "gate",
+    responseMs: Date.now() - requestStartedAt,
+    parseSource: "unsupported",
+    legacyPlannerUsed: false,
+    shadowMode: assistantShadowModeEnabled(),
+  };
+}
+
+function donePayloadFromResult(
+  result: Exclude<Awaited<ReturnType<typeof runAssistantPipeline>>, { error: string; status: number }>
+): AssistantRouteDonePayload {
+  return {
+    type: "done",
+    reply: result.reply,
+    operations: result.operations,
+    activeFilters: result.activeFilters,
+    filteredEntryIds: result.filteredEntryIds,
+    querySource: result.querySource,
+    responseMs: result.responseMs,
+    showcaseFulfillment: result.showcaseFulfillment,
+    schedulePatch: result.schedulePatch,
+    clarificationSession: result.clarificationSession,
+    commandType: result.commandType,
+    parseSource: result.parseSource,
+    legacyPlannerUsed: result.legacyPlannerUsed,
+    shadowMode: assistantShadowModeEnabled(),
+  };
 }
 
 export async function POST(request: Request) {
@@ -71,6 +112,90 @@ export async function POST(request: Request) {
       },
       { status: 503 }
     );
+  }
+
+  const streamingEnabled = assistantRouteStreamingEnabled();
+  if (!streamingEnabled) {
+    let body: Body;
+    try {
+      body = (await request.json()) as Body;
+    } catch {
+      return NextResponse.json({ type: "error", error: "Invalid JSON body" }, { status: 400 });
+    }
+    logTiming("body_parsed", { transport: "json" });
+
+    const messages = Array.isArray(body.messages) ? body.messages : [];
+    const schedule = deserializeScheduleFromWire(body.schedule);
+    const timeZone =
+      body.timeZone?.trim() ||
+      (typeof Intl !== "undefined" ? Intl.DateTimeFormat().resolvedOptions().timeZone : "UTC");
+    const rawCid = body.competitionId;
+    const cid =
+      typeof rawCid === "number"
+        ? rawCid
+        : typeof rawCid === "string"
+          ? Number(rawCid)
+          : NaN;
+    const cidInt = Number.isFinite(cid) && cid > 0 ? Math.floor(cid) : undefined;
+    logTiming("schedule_loaded", {
+      transport: "json",
+      scheduleRows: schedule.length,
+      messageCount: messages.length,
+      competitionId: cidInt,
+    });
+
+    const pipelineInput = {
+      messages,
+      schedule,
+      timeZone,
+      competitionName: body.competitionName,
+      competitionId: cidInt,
+      hitchkickPayload: body.hitchkickPayload,
+      lockedStudios: body.lockedStudios,
+      activeFilters: body.activeFilters,
+      activeEntryIds: body.activeEntryIds,
+      clarificationSession: body.clarificationSession,
+    };
+    const softTimeoutMs = assistantRouteSoftTimeoutMs();
+    const timeoutResult = Symbol("assistant-route-timeout");
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<typeof timeoutResult>((resolve) => {
+      timeout = setTimeout(() => resolve(timeoutResult), softTimeoutMs);
+    });
+    const pipelinePromise = runAssistantPipeline(pipelineInput, {
+      apiKey,
+      stream: false,
+    });
+    const result = await Promise.race([pipelinePromise, timeoutPromise]);
+    if (timeout) clearTimeout(timeout);
+    if (result === timeoutResult) {
+      logTiming("soft_timeout", { softTimeoutMs, transport: "json" });
+      return NextResponse.json(timeoutDonePayload(requestStartedAt));
+    }
+    if ("error" in result) {
+      return NextResponse.json({ type: "error", error: result.error }, { status: result.status });
+    }
+
+    logTiming("command_parsed", {
+      transport: "json",
+      commandType: result.commandType,
+      parseSource: result.parseSource,
+      querySource: result.querySource,
+    });
+    if (result.schedulePatch) {
+      logTiming("patch_generated", {
+        transport: "json",
+        changeCount: result.schedulePatch.changes.length,
+        blocked: result.schedulePatch.blocked,
+        warningCount: result.schedulePatch.warnings.length,
+      });
+    }
+    logTiming("response_completed", { transport: "json" });
+    return NextResponse.json(donePayloadFromResult(result), {
+      headers: {
+        "Cache-Control": "no-store",
+      },
+    });
   }
 
   const encoder = new TextEncoder();

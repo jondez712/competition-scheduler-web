@@ -37,6 +37,10 @@ import {
   assistantShadowModeEnabled,
 } from "@/lib/schedule/assistant/assistantShadowMode";
 import {
+  assistantConnectionInterruptedMessage,
+  assistantResponseTransport,
+} from "@/lib/schedule/assistant/assistantResponseTransport";
+import {
   recordAssistantEvent,
   type AssistantParseSource,
 } from "@/lib/schedule/assistant/assistantTelemetry";
@@ -53,6 +57,30 @@ type ChatMessage = {
 type AssistantProgressItem = {
   label: string;
   detail?: string;
+};
+
+type AssistantTransportEvent = {
+  type: string;
+  content?: string;
+  reply?: string;
+  operations?: ScheduleAssistantOp[];
+  error?: string;
+  raw?: string;
+  label?: string;
+  detail?: string;
+  message?: string;
+  phase?: string;
+  activeFilters?: ScheduleQueryFilters;
+  filteredEntryIds?: string[];
+  querySource?: "local" | "ai" | "gate";
+  responseMs?: number;
+  showcaseFulfillment?: ShowcaseFulfillmentMetrics;
+  schedulePatch?: SchedulePatch;
+  clarificationSession?: ClarificationSession;
+  commandType?: ScheduleCommandType;
+  parseSource?: AssistantParseSource;
+  legacyPlannerUsed?: boolean;
+  shadowMode?: boolean;
 };
 
 type AssistantActiveContext = {
@@ -380,10 +408,6 @@ export function ScheduleAssistantSidebar({
         return;
       }
 
-      // Consume the SSE stream.
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      let sseBuffer = "";
       let reply = "";
       let ops: ScheduleAssistantOp[] = [];
       let streamError: string | null = null;
@@ -398,86 +422,87 @@ export function ScheduleAssistantSidebar({
       let nextLegacyPlannerUsed = false;
       let nextShadowMode = false;
 
-      outer: while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        sseBuffer += dec.decode(value, { stream: true });
-        const lines = sseBuffer.split("\n");
-        sseBuffer = lines.pop() ?? "";
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("data: ")) continue;
-          try {
-            const evt = JSON.parse(trimmed.slice(6)) as {
-              type: string;
-              content?: string;
-              reply?: string;
-              operations?: ScheduleAssistantOp[];
-              error?: string;
-              raw?: string;
-              label?: string;
-              detail?: string;
-              message?: string;
-              phase?: string;
-              activeFilters?: ScheduleQueryFilters;
-              filteredEntryIds?: string[];
-              querySource?: "local" | "ai" | "gate";
-              responseMs?: number;
-              showcaseFulfillment?: ShowcaseFulfillmentMetrics;
-              schedulePatch?: SchedulePatch;
-              clarificationSession?: ClarificationSession;
-              commandType?: ScheduleCommandType;
-              parseSource?: AssistantParseSource;
-              legacyPlannerUsed?: boolean;
-              shadowMode?: boolean;
-            };
-            if (evt.type === "chunk") {
-              // Tool-call argument chunks — no visible content to render yet.
-            } else if (evt.type === "progress" && evt.label) {
-              const nextItem = {
-                label: evt.label,
-                detail: typeof evt.detail === "string" ? evt.detail : undefined,
-              };
-              setProgressItems((items) => {
-                const last = items[items.length - 1];
-                if (last?.label === nextItem.label && last.detail === nextItem.detail) return items;
-                return [...items, nextItem].slice(-5);
-              });
-            } else if (evt.type === "status" && evt.message) {
-              const nextItem = {
-                label: evt.message,
-                detail: typeof evt.phase === "string" ? evt.phase.replaceAll("_", " ") : undefined,
-              };
-              setProgressItems((items) => {
-                const last = items[items.length - 1];
-                if (last?.label === nextItem.label && last.detail === nextItem.detail) return items;
-                return [...items, nextItem].slice(-5);
-              });
-            } else if (evt.type === "heartbeat") {
-              // Keep-alive event for production hosts; no visible UI update needed.
-            } else if (evt.type === "done") {
-              reply = typeof evt.reply === "string" ? evt.reply : "";
-              ops = Array.isArray(evt.operations) ? evt.operations : [];
-              nextActiveFilters = evt.activeFilters;
-              nextFilteredEntryIds = evt.filteredEntryIds;
-              nextQuerySource = evt.querySource;
-              nextShowcaseFulfillment = evt.showcaseFulfillment;
-              nextSchedulePatch = evt.schedulePatch;
-              nextClarificationSession = evt.clarificationSession;
-              nextCommandType = evt.commandType;
-              nextParseSource = evt.parseSource;
-              nextLegacyPlannerUsed = evt.legacyPlannerUsed === true;
-              nextShadowMode = evt.shadowMode === true;
-              if (typeof evt.shadowMode === "boolean") {
-                setServerShadowMode(evt.shadowMode);
-              }
-              break outer;
-            } else if (evt.type === "error") {
-              streamError = evt.error ?? "Unknown assistant error";
-              break outer;
+      const applyAssistantEvent = (evt: AssistantTransportEvent): "done" | "error" | undefined => {
+        if (evt.type === "chunk") {
+          return undefined;
+        }
+        if (evt.type === "progress" && evt.label) {
+          const nextItem = {
+            label: evt.label,
+            detail: typeof evt.detail === "string" ? evt.detail : undefined,
+          };
+          setProgressItems((items) => {
+            const last = items[items.length - 1];
+            if (last?.label === nextItem.label && last.detail === nextItem.detail) return items;
+            return [...items, nextItem].slice(-5);
+          });
+          return undefined;
+        }
+        if (evt.type === "status" && evt.message) {
+          const nextItem = {
+            label: evt.message,
+            detail: typeof evt.phase === "string" ? evt.phase.replaceAll("_", " ") : undefined,
+          };
+          setProgressItems((items) => {
+            const last = items[items.length - 1];
+            if (last?.label === nextItem.label && last.detail === nextItem.detail) return items;
+            return [...items, nextItem].slice(-5);
+          });
+          return undefined;
+        }
+        if (evt.type === "heartbeat") {
+          return undefined;
+        }
+        if (evt.type === "done") {
+          reply = typeof evt.reply === "string" ? evt.reply : "";
+          ops = Array.isArray(evt.operations) ? evt.operations : [];
+          nextActiveFilters = evt.activeFilters;
+          nextFilteredEntryIds = evt.filteredEntryIds;
+          nextQuerySource = evt.querySource;
+          nextShowcaseFulfillment = evt.showcaseFulfillment;
+          nextSchedulePatch = evt.schedulePatch;
+          nextClarificationSession = evt.clarificationSession;
+          nextCommandType = evt.commandType;
+          nextParseSource = evt.parseSource;
+          nextLegacyPlannerUsed = evt.legacyPlannerUsed === true;
+          nextShadowMode = evt.shadowMode === true;
+          if (typeof evt.shadowMode === "boolean") {
+            setServerShadowMode(evt.shadowMode);
+          }
+          return "done";
+        }
+        if (evt.type === "error") {
+          streamError = evt.error ?? "Unknown assistant error";
+          return "error";
+        }
+        return undefined;
+      };
+
+      if (assistantResponseTransport(res.headers.get("Content-Type")) === "json") {
+        const evt = (await res.json()) as AssistantTransportEvent;
+        applyAssistantEvent(evt);
+      } else {
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let sseBuffer = "";
+
+        outer: while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          sseBuffer += dec.decode(value, { stream: true });
+          const lines = sseBuffer.split("\n");
+          sseBuffer = lines.pop() ?? "";
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith("data: ")) continue;
+            try {
+              const outcome = applyAssistantEvent(
+                JSON.parse(trimmed.slice(6)) as AssistantTransportEvent
+              );
+              if (outcome === "done" || outcome === "error") break outer;
+            } catch {
+              /* malformed SSE line */
             }
-          } catch {
-            /* malformed SSE line */
           }
         }
       }
@@ -501,7 +526,8 @@ export function ScheduleAssistantSidebar({
 
       // Track local vs AI stats for the session.
       if (nextQuerySource === "local" || nextQuerySource === "ai") {
-        setStats((s) => ({ ...s, [nextQuerySource]: s[nextQuerySource] + 1 }));
+        const source = nextQuerySource;
+        setStats((s) => ({ ...s, [source]: s[source] + 1 }));
       }
       setActiveClarificationSession(nextClarificationSession ?? null);
 
@@ -645,10 +671,7 @@ export function ScheduleAssistantSidebar({
       setLastError(msg);
       setMessages((m) => [
         ...m,
-        {
-          role: "assistant",
-          content: `Something went wrong sending your message. ${msg ? `(${msg}) ` : ""}Try again.`,
-        },
+        { role: "assistant", content: assistantConnectionInterruptedMessage(msg) },
       ]);
     } finally {
       setLoading(false);
