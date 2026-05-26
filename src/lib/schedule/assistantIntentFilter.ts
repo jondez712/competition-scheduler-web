@@ -76,6 +76,152 @@ function normalizeDivisionPlurals(q: string): string {
     .replace(/\bduos\b/g, "duo");
 }
 
+const NUMBER_WORDS: Record<string, number> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+};
+
+function parseStageNumber(raw: string): number | null {
+  const s = raw.trim().toLowerCase();
+  if (/^\d+$/.test(s)) return parseInt(s, 10);
+  return NUMBER_WORDS[s] ?? null;
+}
+
+function expandStageRange(a: number, b: number): number[] {
+  if (a === b) return [a];
+  const step = a < b ? 1 : -1;
+  const out: number[] = [];
+  for (let n = a; step > 0 ? n <= b : n >= b; n += step) out.push(n);
+  return out;
+}
+
+function parseStageList(raw: string): number[] {
+  const words = Object.keys(NUMBER_WORDS).join("|");
+  const valueRx = new RegExp(`\\b(?:\\d+|${words})\\b`, "gi");
+  const values = [...raw.matchAll(valueRx)]
+    .map((m) => ({ text: m[0]!, index: m.index ?? 0, value: parseStageNumber(m[0]!) }))
+    .filter((m): m is { text: string; index: number; value: number } => m.value !== null && m.value > 0);
+
+  if (values.length === 0) return [];
+  const out = new Set<number>();
+  for (let i = 0; i < values.length; i++) {
+    const current = values[i]!;
+    const next = values[i + 1];
+    if (next) {
+      const between = raw.slice(current.index + current.text.length, next.index);
+      if (/\b(?:to|through|thru)\b|-/.test(between)) {
+        for (const n of expandStageRange(current.value, next.value)) out.add(n);
+        i++;
+        continue;
+      }
+    }
+    out.add(current.value);
+  }
+  return [...out];
+}
+
+function extractStageNumbers(query: string): number[] {
+  const words = Object.keys(NUMBER_WORDS).join("|");
+  const value = `(?:\\d+|${words})`;
+  const list = `${value}(?:\\s*(?:,|and|&|/|-|to|through|thru)\\s*${value})*`;
+  const stageRx = new RegExp(`\\b(?:stage|stages|stg|st)\\.?\\s+(${list})\\b`, "gi");
+  const stageNumbers = new Set<number>();
+  for (const m of query.matchAll(stageRx)) {
+    for (const n of parseStageList(m[1] ?? "")) stageNumbers.add(n);
+  }
+  return [...stageNumbers];
+}
+
+const WEEKDAY_ALIASES: Record<string, string[]> = {
+  monday: ["monday", "mon"],
+  tuesday: ["tuesday", "tues", "tue"],
+  wednesday: ["wednesday", "wed"],
+  thursday: ["thursday", "thurs", "thur", "thu"],
+  friday: ["friday", "fri"],
+  saturday: ["saturday", "sat"],
+  sunday: ["sunday", "sun"],
+};
+
+const MONTH_ALIASES: Record<string, string[]> = {
+  january: ["january", "jan"],
+  february: ["february", "feb"],
+  march: ["march", "mar"],
+  april: ["april", "apr"],
+  may: ["may"],
+  june: ["june", "jun"],
+  july: ["july", "jul"],
+  august: ["august", "aug"],
+  september: ["september", "sept", "sep"],
+  october: ["october", "oct"],
+  november: ["november", "nov"],
+  december: ["december", "dec"],
+};
+
+function containsWord(query: string, phrase: string): boolean {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|\\W)${escaped}(?=$|\\W)`, "i").test(query);
+}
+
+function normalizeNameForQueryMatch(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/['’]s\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\bstudios\b/g, "studio")
+    .replace(/\bacademies\b/g, "academy")
+    .replace(/\bcompanies\b/g, "company")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function queryIncludesName(query: string, name: string): boolean {
+  const q = normalizeNameForQueryMatch(query);
+  const n = normalizeNameForQueryMatch(name);
+  if (n === "other studio" && /\bother studios?\b/.test(q)) return false;
+  const firstWord = n.split(" ")[0] ?? "";
+  if (firstWord.length >= 5 && containsWord(q, firstWord)) return true;
+  return n.length >= 4 && containsWord(q, n);
+}
+
+function dayAliasesForLabel(labelLower: string, dayKey: string): string[] {
+  const aliases = new Set<string>([dayKey.toLowerCase()]);
+  const commaIdx = labelLower.indexOf(",");
+  const weekday = commaIdx > 0 ? labelLower.slice(0, commaIdx).trim() : "";
+  const monthDay = commaIdx > 0 ? labelLower.slice(commaIdx + 1).trim() : labelLower;
+
+  for (const alias of WEEKDAY_ALIASES[weekday] ?? []) aliases.add(alias);
+
+  const monthDayMatch = /^([a-z]+)\s+(\d{1,2})$/.exec(monthDay);
+  if (monthDayMatch) {
+    const month = monthDayMatch[1]!;
+    const day = monthDayMatch[2]!;
+    aliases.add(`${month} ${day}`);
+    for (const m of MONTH_ALIASES[month] ?? []) aliases.add(`${m} ${day}`);
+
+    const keyMatch = /^\d{4}-(\d{2})-(\d{2})$/.exec(dayKey);
+    if (keyMatch) {
+      const monthNum = String(parseInt(keyMatch[1]!, 10));
+      const dayNum = String(parseInt(keyMatch[2]!, 10));
+      aliases.add(`${monthNum}/${dayNum}`);
+      aliases.add(`${keyMatch[1]}/${keyMatch[2]}`);
+    }
+  } else if (monthDay.length >= 4) {
+    aliases.add(monthDay);
+  }
+
+  return [...aliases];
+}
+
 /**
  * Max rows returned by applyQueryFilters for the view context (sidebar badge +
  * conversation carry-forward). This cap applies ONLY to the UI-visible focus
@@ -155,7 +301,18 @@ export function mergeFilters(
     if (isBroadResetQuery(query)) return {}; // broad question → clear carried
     return carried;                           // contextual follow-up → keep carried
   }
-  return fresh; // new explicit filter overrides carried context
+
+  // Merge dimension-by-dimension so a follow-up like
+  // "start Stage 4 with Larkin routines" can add stage/studio while retaining
+  // the previous day focus (e.g. July 7). Fresh dimensions still win.
+  return {
+    stages: fresh.stages ?? carried.stages,
+    dayKeys: fresh.dayKeys ?? carried.dayKeys,
+    levelHints: fresh.levelHints ?? carried.levelHints,
+    divisionHints: fresh.divisionHints ?? carried.divisionHints,
+    studioHints: fresh.studioHints ?? carried.studioHints,
+    categoryHints: fresh.categoryHints ?? carried.categoryHints,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -185,12 +342,8 @@ export function parseQueryFilters(
   const filters: ScheduleQueryFilters = {};
 
   // --- Stage ---
-  const stageMatches = [...q.matchAll(/\bstage\s*(\d+)/g)];
-  if (stageMatches.length > 0) {
-    filters.stages = [
-      ...new Set(stageMatches.map((m) => parseInt(m[1]!, 10))),
-    ];
-  }
+  const stages = extractStageNumbers(q);
+  if (stages.length > 0) filters.stages = stages;
 
   // --- Day ---
   // Strip ordinal suffixes so "July 7th" matches the label "July 7".
@@ -203,12 +356,8 @@ export function parseQueryFilters(
     // the query.  Matching on the month name alone ("july") is intentionally
     // avoided because it is shared by every day within the same month and
     // would incorrectly include all of them.
-    const commaIdx = labelLower.indexOf(",");
-    const weekday = commaIdx > 0 ? labelLower.slice(0, commaIdx).trim() : "";
-    const monthDay = commaIdx > 0 ? labelLower.slice(commaIdx + 1).trim() : labelLower;
-    const weekdayInQuery = weekday.length >= 4 && qForDay.includes(weekday);
-    const monthDayInQuery = monthDay.length >= 4 && qForDay.includes(monthDay);
-    if (weekdayInQuery || monthDayInQuery || qForDay.includes(key)) {
+    const aliases = dayAliasesForLabel(labelLower, key);
+    if (aliases.some((alias) => containsWord(qForDay, alias))) {
       matchedDayKeys.push(key);
     }
   }
@@ -228,20 +377,23 @@ export function parseQueryFilters(
     if (d.includes(" ")) return q.includes(d);
     return new RegExp(`\\b${d}\\b`).test(q);
   });
-  if (divHits.length > 0) filters.divisionHints = [...divHits];
+  if (/\bduo\s*\/?\s*trio\b/.test(q)) {
+    divHits.push("duo", "trio");
+  }
+  if (divHits.length > 0) filters.divisionHints = [...new Set(divHits)];
 
   // --- Studio ---
   const uniqueStudios = [
     ...new Set(schedule.map((r) => r.studioName.trim()).filter((n) => n.length >= 4)),
   ];
-  const studioHits = uniqueStudios.filter((s) => q.includes(s.toLowerCase()));
+  const studioHits = uniqueStudios.filter((s) => queryIncludesName(q, s));
   if (studioHits.length > 0) filters.studioHints = studioHits;
 
   // --- Category ---
   const uniqueCategories = [
     ...new Set(schedule.map((r) => r.categoryName.trim()).filter((n) => n.length >= 4)),
   ];
-  const catHits = uniqueCategories.filter((c) => q.includes(c.toLowerCase()));
+  const catHits = uniqueCategories.filter((c) => queryIncludesName(q, c));
   if (catHits.length > 0) filters.categoryHints = catHits;
 
   return filters;

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseQueryFilters, buildDayKeyToLabel } from "@/lib/schedule/assistantIntentFilter";
+import {
+  parseQueryFilters,
+  buildDayKeyToLabel,
+  mergeFilters,
+} from "@/lib/schedule/assistantIntentFilter";
 import type { ScheduledRoutine } from "@/lib/schedule/types";
 
 // ---------------------------------------------------------------------------
@@ -153,6 +157,21 @@ describe("parseQueryFilters — stage", () => {
     expect(f.stages).toContain(1);
     expect(f.stages).toContain(3);
   });
+
+  it("detects compact multi-stage phrasing", () => {
+    const f = parse("Show routines on stages 1, 2 and 3");
+    expect(f.stages).toEqual([1, 2, 3]);
+  });
+
+  it("detects stage ranges and written numbers", () => {
+    const f = parse("Balance stages one through three");
+    expect(f.stages).toEqual([1, 2, 3]);
+  });
+
+  it("detects common stage abbreviations", () => {
+    const f = parse("List routines on stg 4");
+    expect(f.stages).toEqual([4]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -203,5 +222,95 @@ describe("parseQueryFilters — day (multi-day schedule)", () => {
     const f = parseMulti("rearrange routines for july 7th");
     expect(f.dayKeys).toContain("2026-07-07");
     expect(f.dayKeys).not.toContain("2026-07-05");
+  });
+
+  it("matches weekday abbreviations like Tue", () => {
+    const f = parseMulti("show me tue routines");
+    expect(f.dayKeys).toEqual(["2026-07-07"]);
+  });
+
+  it("matches month abbreviations like Jul 7", () => {
+    const f = parseMulti("show me jul 7 routines");
+    expect(f.dayKeys).toEqual(["2026-07-07"]);
+  });
+
+  it("matches numeric slash dates", () => {
+    const f = parseMulti("show me routines on 7/5");
+    expect(f.dayKeys).toEqual(["2026-07-05"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Combined human phrasing
+// ---------------------------------------------------------------------------
+
+describe("parseQueryFilters — natural phrasing combinations", () => {
+  it("expands duo/trios into duo and trio hints", () => {
+    const f = parse("Show junior duo/trios on stg 4");
+    expect(f.levelHints).toContain("Junior");
+    expect(f.divisionHints).toContain("duo");
+    expect(f.divisionHints).toContain("trio");
+    expect(f.stages).toEqual([4]);
+  });
+
+  it("matches pluralized studio wording against singular studio names", () => {
+    const schedule: ScheduledRoutine[] = [
+      row({ scheduleEntryId: "l1", studioName: "Larkin Dance Studio" }),
+    ];
+    const labels = buildDayKeyToLabel(schedule, "UTC");
+    const f = parseQueryFilters(
+      "i want to start stage 4 with larkin dance studios routines",
+      schedule,
+      labels
+    );
+
+    expect(f.studioHints).toEqual(["Larkin Dance Studio"]);
+    expect(f.stages).toEqual([4]);
+  });
+
+  it("does not treat generic 'other studios' as a literal Other Studio focus", () => {
+    const schedule: ScheduledRoutine[] = [
+      row({ scheduleEntryId: "o1", studioName: "Other Studio" }),
+      row({ scheduleEntryId: "l1", studioName: "Larkin Dance Studio" }),
+    ];
+    const labels = buildDayKeyToLabel(schedule, "UTC");
+    const f = parseQueryFilters(
+      "sprinkle in other studios so larkin has time in between",
+      schedule,
+      labels
+    );
+
+    expect(f.studioHints).toEqual(["Larkin Dance Studio"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Follow-up context
+// ---------------------------------------------------------------------------
+
+describe("mergeFilters — follow-up context", () => {
+  it("keeps prior day focus when a follow-up adds stage and studio", () => {
+    const merged = mergeFilters(
+      { dayKeys: ["2026-07-07"] },
+      { stages: [4], studioHints: ["Larkin Dance Studio"] },
+      "i want to start stage 4 with larkin dance studios routines"
+    );
+
+    expect(merged).toEqual({
+      dayKeys: ["2026-07-07"],
+      stages: [4],
+      studioHints: ["Larkin Dance Studio"],
+    });
+  });
+
+  it("fresh day replaces prior day focus", () => {
+    const merged = mergeFilters(
+      { dayKeys: ["2026-07-07"], stages: [4] },
+      { dayKeys: ["2026-07-05"] },
+      "show me sunday july 5"
+    );
+
+    expect(merged.dayKeys).toEqual(["2026-07-05"]);
+    expect(merged.stages).toEqual([4]);
   });
 });

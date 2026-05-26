@@ -35,7 +35,7 @@ function row(
 }
 
 describe("swapRoutineSlotsByEntryId", () => {
-  it("exchanges start, end, stage for two routines on the same day", () => {
+  it("rejects cross-stage swaps because stage assignments are immutable", () => {
     const a = row("a", {
       day: "2026-05-08",
       stage: 1,
@@ -49,20 +49,10 @@ describe("swapRoutineSlotsByEntryId", () => {
       end: "2026-05-08T18:18:00.000Z",
     });
     const out = swapRoutineSlotsByEntryId([a, b], "a", "b");
-    expect(out).not.toBeNull();
-    const na = out!.find((r) => r.scheduleEntryId === "a")!;
-    const nb = out!.find((r) => r.scheduleEntryId === "b")!;
-    expect(na.stageNum).toBe(2);
-    expect(na.start.getTime()).toBe(b.start.getTime());
-    expect(nb.stageNum).toBe(1);
-    expect(nb.start.getTime()).toBe(a.start.getTime());
-    expect(na.routineTitle).toBe("a");
-    expect(nb.routineTitle).toBe("b");
-    expect(na.routineNumber).toBe("1");
-    expect(nb.routineNumber).toBe("1");
+    expect(out).toBeNull();
   });
 
-  it("after cross-stage swap, renumbers each bucket from that stage's pre-swap floor", () => {
+  it("does not renumber when a cross-stage swap is rejected", () => {
     const day = "2026-05-08";
     const a = row("a", {
       day,
@@ -93,15 +83,7 @@ describe("swapRoutineSlotsByEntryId", () => {
       routineNumber: "11",
     });
     const out = swapRoutineSlotsByEntryId([a, x, b, y], "a", "b");
-    expect(out).not.toBeNull();
-    const nb = out!.find((r) => r.scheduleEntryId === "b")!;
-    const nx = out!.find((r) => r.scheduleEntryId === "x")!;
-    const na = out!.find((r) => r.scheduleEntryId === "a")!;
-    const ny = out!.find((r) => r.scheduleEntryId === "y")!;
-    expect(nb.routineNumber).toBe("1");
-    expect(nx.routineNumber).toBe("2");
-    expect(na.routineNumber).toBe("10");
-    expect(ny.routineNumber).toBe("11");
+    expect(out).toBeNull();
   });
 
   it("after same-stage swap, renumbers by new time order", () => {

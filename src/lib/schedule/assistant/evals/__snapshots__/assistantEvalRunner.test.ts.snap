@@ -1,0 +1,127 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`assistant prompt eval suite > fix-dancer-conflicts: fix dancer conflicts > fix-dancer-conflicts 1`] = `
+{
+  "blockReasons": [],
+  "blocked": false,
+  "changes": 1,
+  "conflictsCreated": 0,
+  "conflictsResolved": 1,
+  "summary": "Found 1 matching conflict. Can resolve 1; 0 require manual attention. Moving 1 routine.",
+  "warnings": [],
+}
+`;
+
+exports[`assistant prompt eval suite > fix-studio-overlaps-day: fix studio overlaps on July 5 > fix-studio-overlaps-day 1`] = `
+{
+  "blockReasons": [],
+  "blocked": false,
+  "changes": 1,
+  "conflictsCreated": 0,
+  "conflictsResolved": 1,
+  "summary": "Found 1 matching conflict. Can resolve 1; 0 require manual attention. Moving 1 routine.",
+  "warnings": [],
+}
+`;
+
+exports[`assistant prompt eval suite > group-studio: group all routines from All Stars Dance Studio together on stage 1 July 5 > group-studio 1`] = `
+{
+  "blockReasons": [],
+  "blocked": false,
+  "changes": 4,
+  "conflictsCreated": 0,
+  "conflictsResolved": 2,
+  "summary": "Grouping 2 All Stars Dance Studio routines together at the beginning of Stage 1 on 2026-07-05.",
+  "warnings": [],
+}
+`;
+
+exports[`assistant prompt eval suite > larkin-studio-windows: i only want to move routines for tuesday, july 7 right now. i would like to rearrange the routines on july 7 for larkin dance studio right now. please start their schedule in stage 4 from 8a-8:30a with their junior duo/trios. then starting at 9a have 15 of their teen AOTY solos from 9a-11:30a. Then from 12:15p-2:15p have their senior female AOTY solos and then their senior male AOTY solo around 3p. > larkin-studio-windows 1`] = `
+{
+  "blockReasons": [],
+  "blocked": false,
+  "changes": 4,
+  "conflictsCreated": 0,
+  "conflictsResolved": 0,
+  "summary": "I can create a preview, but it will create scheduling warnings. Stage 4 appears to apply to the junior duo/trios window. Later windows stay on the routines' imported stages. I'll place Larkin Dance Studio's matching routines inside the requested windows while preserving spacing where possible. 2 swaps proposed.
+junior duo/trios: placed 1/1 (1 matched).
+teen AOTY solos: placed 1/1 (15 requested).
+senior female AOTY solos: placed 1/1 (1 matched).
+senior male AOTY solo: placed 1/1 (1 matched).",
+  "warnings": [
+    "Larkin Dance Studio has routines about 0 minutes apart; preferred spacing is 30 minutes.",
+    "High warning: teen AOTY solos: same-studio spacing is as tight as 0 minutes and 15 routines requested, but only 2 target slots exist in the window.",
+    "High warning: senior female AOTY solos: same-studio spacing is as tight as 0 minutes.",
+  ],
+}
+`;
+
+exports[`assistant prompt eval suite > larkin-studio-windows-follow-up-constraints: please do not move any routines between the stages, keep each routine on the same stage it is currently scheduled. by moving the routines you can swap them with any other studio in the same category > larkin-studio-windows-follow-up-constraints 1`] = `
+{
+  "blockReasons": [],
+  "blocked": false,
+  "changes": 4,
+  "conflictsCreated": 0,
+  "conflictsResolved": 0,
+  "summary": "I can create a preview, but it will create scheduling warnings. Stage 4 appears to apply to the junior duo/trios window. Later windows stay on the routines' imported stages. I'll place Larkin Dance Studio's matching routines inside the requested windows while preserving spacing where possible. 2 swaps proposed.
+junior duo/trios: placed 1/1 (1 matched).
+teen AOTY solos: placed 1/1 (15 requested).
+senior female AOTY solos: placed 1/1 (1 matched).
+senior male AOTY solo: placed 1/1 (1 matched).",
+  "warnings": [
+    "Larkin Dance Studio has routines about 0 minutes apart; preferred spacing is 30 minutes.",
+    "High warning: teen AOTY solos: same-studio spacing is as tight as 0 minutes and 15 routines requested, but only 2 target slots exist in the window.",
+    "High warning: senior female AOTY solos: same-studio spacing is as tight as 0 minutes.",
+  ],
+}
+`;
+
+exports[`assistant prompt eval suite > locked-routine-safety: move routine 123 before routine 140 > locked-routine-safety 1`] = `
+{
+  "blockReasons": [
+    "Locked routine #123 would be moved.",
+  ],
+  "blocked": true,
+  "changes": 2,
+  "conflictsCreated": 1,
+  "conflictsResolved": 0,
+  "summary": "Routine #123 "Shine" will move before routine #140. 1 routine will shift earlier by one position.",
+  "warnings": [],
+}
+`;
+
+exports[`assistant prompt eval suite > move-routine-before: move routine 123 before routine 140 > move-routine-before 1`] = `
+{
+  "blockReasons": [],
+  "blocked": false,
+  "changes": 2,
+  "conflictsCreated": 0,
+  "conflictsResolved": 0,
+  "summary": "Routine #123 "Shine" will move before routine #140. 1 routine will shift earlier by one position.",
+  "warnings": [],
+}
+`;
+
+exports[`assistant prompt eval suite > move-studio-beginning: move larkin dance studio routines to the beginning of stage 1 on July 5 > move-studio-beginning 1`] = `
+{
+  "blockReasons": [],
+  "blocked": false,
+  "changes": 3,
+  "conflictsCreated": 0,
+  "conflictsResolved": 2,
+  "summary": "Moving 2 Larkin Dance Studio routines to the beginning of Stage 1 on 2026-07-05.",
+  "warnings": [],
+}
+`;
+
+exports[`assistant prompt eval suite > spread-studio: spread larkin dance studio routines on stage 1 July 5 so they are not back to back > spread-studio 1`] = `
+{
+  "blockReasons": [],
+  "blocked": false,
+  "changes": 2,
+  "conflictsCreated": 0,
+  "conflictsResolved": 2,
+  "summary": "Spacing 2 Larkin Dance Studio routines on Stage 1 for 2026-07-05 by sprinkling in other studios.",
+  "warnings": [],
+}
+`;

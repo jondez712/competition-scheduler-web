@@ -6,6 +6,8 @@ import {
   type AssistantChatMessage,
   type SerializedRoutineWire,
 } from "@/lib/schedule/assistantPipeline";
+import type { ClarificationSession } from "@/lib/schedule/assistant/clarificationSession";
+import { assistantShadowModeEnabled } from "@/lib/schedule/assistant/assistantShadowMode";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -25,7 +27,17 @@ type Body = {
   lockedStudios?: string[];
   activeFilters?: ScheduleQueryFilters;
   activeEntryIds?: string[];
+  clarificationSession?: ClarificationSession;
 };
+
+export async function GET() {
+  return NextResponse.json({
+    shadowMode: assistantShadowModeEnabled(),
+    legacyPlannerEnabled:
+      env("SCHEDULE_ASSISTANT_LEGACY_PLANNER_ENABLED") === "1" ||
+      env("SCHEDULE_ASSISTANT_LEGACY_PLANNER_ENABLED")?.toLowerCase() === "true",
+  });
+}
 
 export async function POST(request: Request) {
   const apiKey = env("OPENAI_API_KEY");
@@ -76,6 +88,7 @@ export async function POST(request: Request) {
     lockedStudios: body.lockedStudios,
     activeFilters: body.activeFilters,
     activeEntryIds: body.activeEntryIds,
+    clarificationSession: body.clarificationSession,
   };
 
   // For AI path we stream chunks via callbacks; for local path pipeline returns immediately.
@@ -93,6 +106,9 @@ export async function POST(request: Request) {
         const result = await runAssistantPipeline(pipelineInput, {
           apiKey,
           callbacks: {
+            onProgress: (label, detail) => {
+              controller.enqueue(sseEvent({ type: "progress", label, detail }));
+            },
             onChunk: (content) => {
               controller.enqueue(sseEvent({ type: "chunk", content }));
             },
@@ -115,6 +131,12 @@ export async function POST(request: Request) {
             querySource: result.querySource,
             responseMs: result.responseMs,
             showcaseFulfillment: result.showcaseFulfillment,
+            schedulePatch: result.schedulePatch,
+            clarificationSession: result.clarificationSession,
+            commandType: result.commandType,
+            parseSource: result.parseSource,
+            legacyPlannerUsed: result.legacyPlannerUsed,
+            shadowMode: assistantShadowModeEnabled(),
           })
         );
       } catch (e) {

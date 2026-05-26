@@ -54,6 +54,12 @@ import {
   generateReplyFromPlan,
   detectBulkOpenerIntent,
   buildBulkOpenerOps,
+  detectStudioFrontLoadIntent,
+  detectStudioFrontLoadRequest,
+  buildStudioFrontLoadOps,
+  detectStudioSpacingIntent,
+  buildStudioSpacingOps,
+  type StudioFrontLoadIntent,
 } from "@/lib/schedule/assistantPlanExecutor";
 import { extractSchedulingGoals } from "@/lib/schedule/assistantGoalExtract";
 import type {
@@ -65,6 +71,30 @@ import type {
 const SHOWCASE_LLM_GAP_FILL_THRESHOLD = 0.75;
 import { planShowcaseDay } from "@/lib/schedule/assistantShowcasePlanner";
 import type { ScheduleAssistantOp } from "@/lib/schedule/scheduleAssistantOps";
+import {
+  applyOptimizeStudioWindowConstraintText,
+  isOptimizeStudioWindowConstraintText,
+  parseScheduleCommand,
+  stageMoveRefusalForText,
+} from "@/lib/schedule/assistant/parseScheduleCommand";
+import { resolveCommandEntities } from "@/lib/schedule/assistant/resolveCommandEntities";
+import { scheduleCommandToPatch } from "@/lib/schedule/scheduler/scheduleCommandToPatch";
+import type { SchedulePatch } from "@/lib/schedule/patches/SchedulePatch";
+import type { ScheduleCommand } from "@/lib/schedule/assistant/commandTypes";
+import {
+  recordAssistantEvent,
+  type AssistantParseSource,
+} from "@/lib/schedule/assistant/assistantTelemetry";
+import {
+  applyClarificationAnswer,
+  createClarificationSession,
+  type ClarificationSession,
+} from "@/lib/schedule/assistant/clarificationSession";
+import {
+  aiScheduleCommandParser,
+  buildAiScheduleCommandWorldSummary,
+  SUPPORTED_COMMAND_ACTIONS,
+} from "@/lib/schedule/assistant/aiScheduleCommandParser";
 
 function env(name: string): string | undefined {
   const v = process.env[name];
@@ -114,6 +144,7 @@ export type AssistantPipelineInput = {
   lockedStudios?: string[];
   activeFilters?: ScheduleQueryFilters;
   activeEntryIds?: string[];
+  clarificationSession?: ClarificationSession;
 };
 
 /**
@@ -127,10 +158,175 @@ export type PromptMode = "retrieval" | "mutation";
  * Classify the user query into a prompt mode before building the prompt.
  * Conservative: any mutation keyword → "mutation" (full context is never harmful).
  */
-function classifyPromptMode(query: string): PromptMode {
+export function classifyPromptMode(query: string): PromptMode {
   const mutationPattern =
-    /\b(swap|exchange|switch|move|reassign|reorder|rearrange|put all|send all|place all)\b/i;
-  return mutationPattern.test(query) ? "mutation" : "retrieval";
+    /\b(swap|exchange|switch|move|reassign|assign|change|shift|reorder|rearrange|reorganize|optimize|balance|spread|distribute|put|send|place|group|cluster|resolve|fix|repair)\b/i;
+  const openerPattern =
+    /\b(start|open|begin)\b.{0,40}\b(every|each|all|stage|schedule|with)\b/i;
+  const frontLoadPattern =
+    /\b(all|every|each|them|routines?)\b.{0,80}\b(beginning|front|top|first|opening|early|earliest)\b|\b(beginning|front|top|first|opening|early|earliest)\b.{0,80}\b(all|every|each|them|routines?)\b/i;
+  const spacingPattern =
+    /\b(space|spacing|sprinkle|separate|break up|back to back|time in between|time between|minutes?\s+between|minutes?\s+apart|breathing room|quick changes?)\b/i;
+  const scopeOnlyPattern = /\b(?:only\s+)?(?:touch|affect|modify)\b.{0,80}\b(?:stage|routines?|groups?|solos?)\b/i;
+  const conflictPattern =
+    /\b(analy[sz]e|check|show|find|look for|resolve|fix|repair|clean up)\b.{0,40}\b(conflicts?|overlaps?|issues?)\b|\b(conflicts?|overlaps?)\b.{0,40}\b(analy[sz]e|resolve|fix|repair)\b/i;
+  const vagueUnsupportedPattern =
+    /\b(make|improve|optimize|perfect)\b.{0,80}\b(schedule|whole day|everything|day)\b|\b(schedule|whole day|everything|day)\b.{0,80}\b(perfect|better|best)\b/i;
+  const timeBlockPattern =
+    /\b(from|between|around|at)\s+\d{1,2}(?::\d{2})?\s*[ap]\.?m?\.?/i;
+  return mutationPattern.test(query) ||
+    openerPattern.test(query) ||
+    frontLoadPattern.test(query) ||
+    spacingPattern.test(query) ||
+    scopeOnlyPattern.test(query) ||
+    conflictPattern.test(query) ||
+    vagueUnsupportedPattern.test(query) ||
+    timeBlockPattern.test(query)
+    ? "mutation"
+    : "retrieval";
+}
+
+export function completeStudioFrontLoadDayClarification(
+  messages: AssistantChatMessage[],
+  filters: ScheduleQueryFilters
+): StudioFrontLoadIntent | null {
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+  const askedForDay =
+    lastAssistant?.content &&
+    /\bwhich date should I use\b/i.test(lastAssistant.content) &&
+    (/\bI can move\b/i.test(lastAssistant.content) || /\bOptions:\s*\d{4}-\d{2}-\d{2}/i.test(lastAssistant.content)) &&
+    (/\bbeginning\b/i.test(lastAssistant.content) || (filters.studioHints?.length ?? 0) === 1);
+  if (!askedForDay) return null;
+  if ((filters.studioHints?.length ?? 0) !== 1) return null;
+  if ((filters.stages?.length ?? 0) !== 1) return null;
+  if ((filters.dayKeys?.length ?? 0) !== 1) return null;
+
+  return {
+    studioName: filters.studioHints![0]!,
+    stageNum: filters.stages![0]!,
+    dayKey: filters.dayKeys![0]!,
+  };
+}
+
+function normalizeLooseName(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/['’]s\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\bstudios\b/g, "studio")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function inferStudioFromQueryLoose(query: string, schedule: ScheduledRoutine[]): string | undefined {
+  const q = normalizeLooseName(query);
+  if (!q) return undefined;
+  const generic = new Set([
+    "dance",
+    "studio",
+    "studios",
+    "company",
+    "academy",
+    "school",
+    "performing",
+    "arts",
+    "center",
+    "centre",
+    "stage",
+    "the",
+  ]);
+  const studios = [...new Set(schedule.map((r) => r.studioName.trim()).filter(Boolean))];
+  const exactHits = studios.filter((studio) => {
+    const normalized = normalizeLooseName(studio);
+    return normalized && q.includes(normalized);
+  });
+  if (exactHits.length === 1) return exactHits[0];
+  const hits = studios.filter((studio) => {
+    const normalized = normalizeLooseName(studio);
+    const distinctiveWords = normalized
+      .split(" ")
+      .filter((w) => w.length >= 5 && !generic.has(w));
+    return distinctiveWords.some((w) => new RegExp(`(^|\\W)${w}(?=$|\\W)`).test(q));
+  });
+  return hits.length === 1 ? hits[0] : undefined;
+}
+
+function previousUserQuery(messages: AssistantChatMessage[]): string | undefined {
+  const users = messages.filter((m) => m.role === "user" && m.content.trim());
+  return users.length >= 2 ? users[users.length - 2]!.content.trim() : undefined;
+}
+
+function makePipelineCommandId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `cmd-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function frontLoadIntentToCommand(
+  intent: StudioFrontLoadIntent,
+  originalText: string
+): ScheduleCommand {
+  return {
+    commandId: makePipelineCommandId(),
+    type: "MOVE_STUDIO",
+    source: "user",
+    originalText,
+    confidence: 0.92,
+    requiresConfirmation: true,
+    scope: {
+      dayKey: intent.dayKey,
+      stageNum: intent.stageNum,
+      stageId: `stage-${intent.stageNum}`,
+      stageName: `Stage ${intent.stageNum}`,
+    },
+    target: {
+      kind: "studio",
+      studioName: intent.studioName,
+      studioId: `studio:${intent.studioName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`,
+    },
+    placement: "BEGINNING_OF_STAGE",
+    preserveRelativeOrder: true,
+  };
+}
+
+function patchReply(patch: SchedulePatch): string {
+  if (!patch.blocked) return patch.summary;
+  if (patch.summary.includes("Window diagnostics:")) return patch.summary;
+  const reasons = patch.blockReasons.length ? `\n\n— ${patch.blockReasons.join("\n— ")}` : "";
+  return `${patch.summary}${reasons}`;
+}
+
+function legacyMutationPlannerEnabled(): boolean {
+  const v = process.env.SCHEDULE_ASSISTANT_LEGACY_PLANNER_ENABLED?.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
+function unsupportedCommandReply(reason?: string): string {
+  return `${reason?.trim() || "I can only preview specific schedule commands right now."}\n\nSupported actions:\n${SUPPORTED_COMMAND_ACTIONS.map((action) => `- ${action}`).join("\n")}`;
+}
+
+function isStrictUnsupportedVagueMutation(query: string): boolean {
+  const q = query.toLowerCase();
+  return (
+    /\bmake\b.{0,80}\b(schedule|whole day|everything|the day)\b.{0,80}\b(perfect|better|best)\b/.test(q) ||
+    /\b(schedule|whole day|everything|the day)\b.{0,80}\b(perfect|better|best)\b/.test(q) ||
+    /\b(make|optimize|improve)\b.{0,80}\b(everything|whole schedule|whole day)\b/.test(q)
+  );
+}
+
+function scheduleCommandWorldSummary(params: {
+  schedule: ScheduledRoutine[];
+  activeFilters: ScheduleQueryFilters;
+  selectedRoutineCount: number;
+}) {
+  return buildAiScheduleCommandWorldSummary({
+    days: [...new Set(params.schedule.map((row) => row.calendarDayKey).filter(Boolean))],
+    stages: [...new Set(params.schedule.map((row) => row.stageNum).filter((n) => Number.isFinite(n)))],
+    selectedRoutineCount: params.selectedRoutineCount,
+    knownStudioNames: [...new Set(params.schedule.map((row) => row.studioName.trim()).filter(Boolean))],
+    activeFilters: params.activeFilters,
+  });
 }
 
 export type AssistantPipelineResult = {
@@ -164,6 +360,16 @@ export type AssistantPipelineResult = {
   };
   /** Per-block showcase fulfillment when deterministic showcase planner ran. */
   showcaseFulfillment?: ShowcaseFulfillmentMetrics;
+  /** First-class command patch preview. Current UI also receives assistant operations for compatibility. */
+  schedulePatch?: SchedulePatch;
+  /** Stateful follow-up context for ambiguous ScheduleCommand requests. */
+  clarificationSession?: ClarificationSession;
+  /** Typed command recognized by the finite command parser, when applicable. */
+  commandType?: ScheduleCommand["type"];
+  /** Product telemetry hint for which parser/planner path handled the request. */
+  parseSource?: AssistantParseSource;
+  /** True only when the quarantined legacy freeform planner handled this request. */
+  legacyPlannerUsed?: boolean;
   /**
    * Token counts from the OpenAI response (only populated on the non-streaming
    * path; undefined for local/gate results and streaming calls).
@@ -183,6 +389,7 @@ export type AssistantPipelineError = {
 
 export type AssistantPipelineCallbacks = {
   onChunk?: (content: string) => void;
+  onProgress?: (label: string, detail?: string) => void;
 };
 
 export function deserializeScheduleFromWire(
@@ -265,6 +472,10 @@ function studioKeyForOverlap(r: ScheduledRoutine): string {
   const n = r.studioName.trim();
   if (n) return n;
   return r.studioCode.trim();
+}
+
+function escCell(s: string, max = 96): string {
+  return s.replace(/\t/g, " ").replace(/\r?\n/g, " ").slice(0, max);
 }
 
 function verifiedSameStudioTimeOverlapsBlock(rows: ScheduledRoutine[], timeZone: string): string {
@@ -667,6 +878,9 @@ export async function runAssistantPipeline(
     stream?: boolean;
   }
 ): Promise<AssistantPipelineResult | AssistantPipelineError> {
+  const progress = options.callbacks?.onProgress;
+  progress?.("Reading your request", "Checking the latest message and event context.");
+
   const messages = input.messages;
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
   if (!lastUser?.content?.trim()) {
@@ -707,7 +921,41 @@ export async function runAssistantPipeline(
   const freshFilters = schedule.length
     ? parseQueryFilters(lastUserQuery, schedule, dayKeyToLabel)
     : {};
-  const mergedFilters = mergeFilters(input.activeFilters, freshFilters, lastUserQuery);
+  let mergedFilters = mergeFilters(input.activeFilters, freshFilters, lastUserQuery);
+  if (schedule.length) {
+    const recoverMissingFilters = (query: string | undefined) => {
+      if (!query) return;
+      const parsed = parseQueryFilters(query, schedule, dayKeyToLabel);
+      const looseStudio = inferStudioFromQueryLoose(query, schedule);
+      const hasSingleStudio = (mergedFilters.studioHints?.length ?? 0) === 1;
+      mergedFilters = {
+        ...mergedFilters,
+        ...(hasSingleStudio
+          ? {}
+          : looseStudio
+            ? { studioHints: [looseStudio] }
+            : mergedFilters.studioHints?.length
+              ? {}
+            : parsed.studioHints?.length
+              ? { studioHints: parsed.studioHints }
+              : {}),
+        ...(mergedFilters.stages?.length || !parsed.stages?.length
+          ? {}
+          : { stages: parsed.stages }),
+        ...(mergedFilters.dayKeys?.length || !parsed.dayKeys?.length
+          ? {}
+          : { dayKeys: parsed.dayKeys }),
+      };
+    };
+    recoverMissingFilters(lastUserQuery);
+    recoverMissingFilters(previousUserQuery(messages));
+  }
+  progress?.(
+    "Finding the relevant routines",
+    hasAnyFilters(mergedFilters)
+      ? "Using your stage, day, level, studio, or category hints."
+      : "No narrow filter found, so the full schedule stays available."
+  );
 
   // ---------------------------------------------------------------------------
   // View context: conversation filter carry-forward (sidebar badge + LLM hint).
@@ -725,6 +973,7 @@ export async function runAssistantPipeline(
   // Operates on the full schedule — unaffected by conversation filters.
   let schedulingGoals: SchedulingGoalRequest | null = null;
   if (schedule.length > 0) {
+    progress?.("Parsing scheduling goals", "Looking for times, stages, studios, and constraints.");
     schedulingGoals = extractSchedulingGoals(lastUserQuery, schedule, dayKeyToLabel);
   }
 
@@ -738,6 +987,9 @@ export async function runAssistantPipeline(
   const worldModel = schedule.length
     ? buildPlannerWorldModel(schedule, [], lockedStudiosList, timeZone)
     : null;
+  if (worldModel) {
+    progress?.("Building schedule context", "Mapping the stage/day layout for planning.");
+  }
 
   // Resolve which stage-days get full semantic rows in the LLM context.
   // Explicitly-referenced routine numbers force their stage-days into scope.
@@ -761,8 +1013,148 @@ export async function runAssistantPipeline(
     : { semanticRows: [], topologySummary: "", viewHint: "", totalRoutines: 0 };
 
   const reqStart = Date.now();
+  if (input.clarificationSession) {
+    progress?.("Reading your follow-up", "Continuing the schedule edit we were clarifying.");
+    const clarified = applyClarificationAnswer(input.clarificationSession, lastUserQuery, {
+      schedule,
+      timeZone,
+    });
+    if (clarified.status === "CLARIFY") {
+      const responseMs = Date.now() - reqStart;
+      return {
+        reply: clarified.session.question,
+        operations: [],
+        querySource: "gate",
+        needsClarification: true,
+        activeFilters: mergedFilters,
+        filteredEntryIds,
+        responseMs,
+        promptMode: "mutation",
+        clarificationSession: clarified.session,
+        commandType: clarified.session.partialCommand.type,
+        parseSource: "gate",
+      };
+    }
+    if (clarified.status === "RESOLVED") {
+      const patch = scheduleCommandToPatch({
+        command: clarified.command,
+        schedule,
+        timeZone,
+      });
+      const responseMs = Date.now() - reqStart;
+      console.log(
+        `[assistant] source=command/clarified type=${clarified.command.type} blocked=${patch.blocked} ops=${patch.assistantOperations?.length ?? 0} ms=${responseMs}`
+      );
+      return {
+        reply: patchReply(patch),
+        operations: patch.assistantOperations ?? [],
+        querySource: "local",
+        activeFilters: mergedFilters,
+        filteredEntryIds,
+        responseMs,
+        promptMode: "mutation",
+        schedulePatch: patch,
+        commandType: clarified.command.type,
+        parseSource: "local",
+      };
+    }
+    // Expired or unsupported sessions fall back to normal parsing of this turn.
+  }
+
+  const clarifiedFrontLoadIntent = completeStudioFrontLoadDayClarification(
+    messages,
+    mergedFilters
+  );
+  if (clarifiedFrontLoadIntent) {
+    progress?.(
+      "Moving studio routines earlier",
+      `Using your date reply for Stage ${clarifiedFrontLoadIntent.stageNum} on ${clarifiedFrontLoadIntent.dayKey}.`
+    );
+    const command = frontLoadIntentToCommand(clarifiedFrontLoadIntent, lastUserQuery);
+    const patch = scheduleCommandToPatch({ command, schedule, timeZone });
+    const ops = patch.assistantOperations ?? [];
+    const responseMs = Date.now() - reqStart;
+    console.log(
+      `[assistant] source=deterministic/studio-front-load/clarified studio="${clarifiedFrontLoadIntent.studioName}" ` +
+        `stage=${clarifiedFrontLoadIntent.stageNum} day=${clarifiedFrontLoadIntent.dayKey} ops=${ops.length} ms=${responseMs}`
+    );
+    return {
+      reply: patchReply(patch),
+      operations: ops,
+      querySource: "local",
+      activeFilters: mergedFilters,
+      filteredEntryIds,
+      responseMs,
+      promptMode: "mutation",
+      schedulePatch: patch,
+      commandType: command.type,
+      parseSource: "local",
+    };
+  }
+
+  const previousQuery = previousUserQuery(messages);
+  if (previousQuery && isOptimizeStudioWindowConstraintText(lastUserQuery)) {
+    const previousParsed = parseScheduleCommand({
+      text: previousQuery,
+      schedule,
+      timeZone,
+      activeFilters: mergedFilters,
+      source: "user",
+    });
+    const previousCommand =
+      previousParsed.status === "COMMAND" || previousParsed.status === "CLARIFY"
+        ? previousParsed.command
+        : undefined;
+    if (previousCommand?.type === "OPTIMIZE_STUDIO_WINDOWS") {
+      progress?.("Applying your added constraints", "Keeping the original window plan and updating its safety rules.");
+      const constrained = applyOptimizeStudioWindowConstraintText(previousCommand, lastUserQuery);
+      const resolved = resolveCommandEntities(constrained, schedule);
+      if (resolved.status === "CLARIFY") {
+        const responseMs = Date.now() - reqStart;
+        const clarificationSession = createClarificationSession({
+          originalText: previousCommand.originalText,
+          command: resolved.command,
+          ambiguities: resolved.ambiguities,
+        });
+        return {
+          reply: clarificationSession.question,
+          operations: [],
+          querySource: "gate",
+          needsClarification: true,
+          activeFilters: mergedFilters,
+          filteredEntryIds,
+          responseMs,
+          promptMode: "mutation",
+          clarificationSession,
+          commandType: resolved.command.type,
+          parseSource: "gate",
+        };
+      }
+      if (resolved.status === "RESOLVED") {
+        const patch = scheduleCommandToPatch({ command: resolved.command, schedule, timeZone });
+        const responseMs = Date.now() - reqStart;
+        console.log(
+          `[assistant] source=command/follow-up-constraints type=${resolved.command.type} blocked=${patch.blocked} ops=${patch.assistantOperations?.length ?? 0} ms=${responseMs}`
+        );
+        return {
+          reply: patchReply(patch),
+          operations: patch.assistantOperations ?? [],
+          querySource: "local",
+          activeFilters: mergedFilters,
+          filteredEntryIds,
+          responseMs,
+          promptMode: "mutation",
+          schedulePatch: patch,
+          commandType: resolved.command.type,
+          parseSource: "local",
+        };
+      }
+    }
+  }
+
   const localIntent = classifyLocalQuery(lastUserQuery, mergedFilters);
   if (localIntent && viewFocusedRows.length > 0) {
+    progress?.("Checking for an instant answer", "This looks like a read-only schedule question.");
     const localRows = filterScheduleRows(schedule, mergedFilters);
     const reply = executeLocalQuery(
       localIntent,
@@ -788,7 +1180,39 @@ export async function runAssistantPipeline(
     };
   }
 
+  if (isStrictUnsupportedVagueMutation(lastUserQuery)) {
+    const responseMs = Date.now() - reqStart;
+    console.log(`[assistant] source=command/unsupported-vague ms=${responseMs}`);
+    return {
+      reply: unsupportedCommandReply("That request is too broad to preview safely as a schedule edit."),
+      operations: [],
+      querySource: "gate",
+      activeFilters: mergedFilters,
+      filteredEntryIds,
+      responseMs,
+      promptMode: "mutation",
+      parseSource: "unsupported",
+    };
+  }
+
+  const stageMoveRefusal = stageMoveRefusalForText(lastUserQuery);
+  if (stageMoveRefusal) {
+    const responseMs = Date.now() - reqStart;
+    console.log(`[assistant] source=command/stage-refusal ms=${responseMs}`);
+    return {
+      reply: stageMoveRefusal,
+      operations: [],
+      querySource: "gate",
+      activeFilters: mergedFilters,
+      filteredEntryIds,
+      responseMs,
+      promptMode: "mutation",
+      parseSource: "unsupported",
+    };
+  }
+
   // Feasibility gate — deterministic check before any OpenAI call.
+  progress?.("Checking safety", "Looking for ambiguity, huge edits, or risky schedule changes.");
   const gateResult = analyzeFeasibility(lastUserQuery, schedule, mergedFilters);
   if (gateResult.status === "needs_clarification") {
     const responseMs = Date.now() - reqStart;
@@ -875,6 +1299,106 @@ export async function runAssistantPipeline(
   // MUTATION PATH — structured planner + deterministic executor (0 extra AI tokens)
   // ---------------------------------------------------------------------------
   if (promptMode === "mutation") {
+    progress?.("Planning schedule changes", "Preparing a structured plan before anything is applied.");
+    const parsedCommand = parseScheduleCommand({
+      text: lastUserQuery,
+      schedule,
+      timeZone,
+      activeFilters: mergedFilters,
+      source: "user",
+    });
+    if (parsedCommand.status === "CLARIFY") {
+      const responseMs = Date.now() - reqStart;
+      const clarificationSession = parsedCommand.command
+        ? createClarificationSession({
+            originalText: parsedCommand.command.originalText,
+            command: parsedCommand.command,
+            ambiguities: parsedCommand.command.ambiguities ?? [],
+          })
+        : undefined;
+      return {
+        reply: clarificationSession?.question ?? parsedCommand.clarificationQuestion,
+        operations: [],
+        querySource: "gate",
+        needsClarification: true,
+        activeFilters: mergedFilters,
+        filteredEntryIds,
+        responseMs,
+        promptMode,
+        clarificationSession,
+        commandType: parsedCommand.command?.type,
+        parseSource: "gate",
+      };
+    }
+    if (parsedCommand.status === "COMMAND") {
+      const resolvedCommand = resolveCommandEntities(parsedCommand.command, schedule);
+      if (resolvedCommand.status === "CLARIFY") {
+        const responseMs = Date.now() - reqStart;
+        const clarificationSession = createClarificationSession({
+          originalText: resolvedCommand.command.originalText,
+          command: resolvedCommand.command,
+          ambiguities: resolvedCommand.ambiguities,
+        });
+        return {
+          reply: clarificationSession.question,
+          operations: [],
+          querySource: "gate",
+          needsClarification: true,
+          activeFilters: mergedFilters,
+          filteredEntryIds,
+          responseMs,
+          promptMode,
+          clarificationSession,
+          commandType: resolvedCommand.command.type,
+          parseSource: "gate",
+        };
+      }
+      if (resolvedCommand.status === "RESOLVED") {
+        const patch = scheduleCommandToPatch({
+          command: resolvedCommand.command,
+          schedule,
+          timeZone,
+        });
+        const responseMs = Date.now() - reqStart;
+        console.log(
+          `[assistant] source=command type=${resolvedCommand.command.type} blocked=${patch.blocked} ops=${patch.assistantOperations?.length ?? 0} ms=${responseMs}`
+        );
+        return {
+          reply: patchReply(patch),
+          operations: patch.assistantOperations ?? [],
+          querySource: "local",
+          activeFilters: mergedFilters,
+          filteredEntryIds,
+          responseMs,
+          promptMode,
+          schedulePatch: patch,
+          commandType: resolvedCommand.command.type,
+          parseSource: "local",
+        };
+      }
+      if (resolvedCommand.status === "UNSUPPORTED") {
+        const responseMs = Date.now() - reqStart;
+        console.log(
+          `[assistant] source=command/unsupported type=${parsedCommand.command.type} ms=${responseMs}`
+        );
+        return {
+          reply: unsupportedCommandReply(resolvedCommand.reason),
+          operations: [],
+          querySource: "gate",
+          activeFilters: mergedFilters,
+          filteredEntryIds,
+          responseMs,
+          promptMode,
+          commandType: parsedCommand.command.type,
+          parseSource: "unsupported",
+        };
+      }
+    }
+    const localParseUnsupportedReason =
+      parsedCommand.status === "UNSUPPORTED" ? parsedCommand.reason : undefined;
+
+    // TODO: migrate remaining mutation fallback into strict ScheduleCommand parsing
+    // so the LLM can only emit typed commands, never direct schedule operations.
     // ---------------------------------------------------------------------------
     // Deterministic fast path: "start every stage with <studio>" bulk opener
     // Bypasses the planner LLM entirely — no tokens used.
@@ -882,10 +1406,77 @@ export async function runAssistantPipeline(
     const studioHints = mergedFilters.studioHints ?? [];
     const bulkOpenerStudio = detectBulkOpenerIntent(lastUserQuery, studioHints);
     if (bulkOpenerStudio) {
+      progress?.("Building opener swaps", "Finding the first slot on each stage/day pair.");
       const { ops, summary } = buildBulkOpenerOps(schedule, bulkOpenerStudio);
       const responseMs = Date.now() - reqStart;
       console.log(
         `[assistant] source=deterministic/bulk-opener studio="${bulkOpenerStudio}" ops=${ops.length} ms=${responseMs}`
+      );
+      return {
+        reply: summary,
+        operations: ops,
+        querySource: "local",
+        activeFilters: mergedFilters,
+        filteredEntryIds,
+        responseMs,
+        promptMode,
+      };
+    }
+
+    const frontLoadRequest = detectStudioFrontLoadRequest(lastUserQuery, mergedFilters);
+    if (frontLoadRequest && !frontLoadRequest.dayKey) {
+      const responseMs = Date.now() - reqStart;
+      const stagePart =
+        frontLoadRequest.stageNum !== undefined ? ` Stage ${frontLoadRequest.stageNum}` : "";
+      const studioPart = frontLoadRequest.studioName ?? "that studio";
+      return {
+        reply:
+          `I can move ${studioPart} routines to the beginning${stagePart}, but I need the day first. ` +
+          "Which date should I use?",
+        operations: [],
+        querySource: "gate",
+        needsClarification: true,
+        activeFilters: mergedFilters,
+        filteredEntryIds,
+        responseMs,
+        promptMode,
+      };
+    }
+
+    const frontLoadIntent = detectStudioFrontLoadIntent(lastUserQuery, mergedFilters);
+    if (frontLoadIntent) {
+      progress?.(
+        "Moving studio routines earlier",
+        `Keeping the plan inside Stage ${frontLoadIntent.stageNum} on ${frontLoadIntent.dayKey}.`
+      );
+      const { ops, summary } = buildStudioFrontLoadOps(schedule, frontLoadIntent);
+      const responseMs = Date.now() - reqStart;
+      console.log(
+        `[assistant] source=deterministic/studio-front-load studio="${frontLoadIntent.studioName}" ` +
+          `stage=${frontLoadIntent.stageNum} day=${frontLoadIntent.dayKey} ops=${ops.length} ms=${responseMs}`
+      );
+      return {
+        reply: summary,
+        operations: ops,
+        querySource: "local",
+        activeFilters: mergedFilters,
+        filteredEntryIds,
+        responseMs,
+        promptMode,
+      };
+    }
+
+    const spacingIntent = detectStudioSpacingIntent(lastUserQuery, mergedFilters);
+    if (spacingIntent) {
+      progress?.(
+        "Spacing studio routines",
+        `Keeping the spacing plan inside Stage ${spacingIntent.stageNum} on ${spacingIntent.dayKey}.`
+      );
+      const { ops, summary } = buildStudioSpacingOps(schedule, spacingIntent);
+      const responseMs = Date.now() - reqStart;
+      console.log(
+        `[assistant] source=deterministic/studio-spacing studio="${spacingIntent.studioName}" ` +
+          `stage=${spacingIntent.stageNum} day=${spacingIntent.dayKey} ops=${ops.length} ms=${responseMs}`
       );
       return {
         reply: summary,
@@ -910,6 +1501,7 @@ export async function runAssistantPipeline(
       (schedulingGoals.kind === "showcase_day" || schedulingGoals.kind === "reorder_stage") &&
       schedulingGoals.timeBlocks.length > 0
     ) {
+      progress?.("Trying the deterministic planner", "Matching requested time blocks to routines.");
       const showcaseResult = planShowcaseDay(schedule, schedulingGoals, timeZone, worldModel ?? undefined);
       const { ops, summary, warnings, metrics } = showcaseResult;
       showcaseFulfillmentForGapFill = metrics;
@@ -940,8 +1532,106 @@ export async function runAssistantPipeline(
         };
       }
       // All blocks completely failed (0 ops, 0 fulfilled, 0 partial) — only then
-      // fall through to the LLM planner.
-      console.log(`[assistant] showcase fast path produced 0 ops and 0 placements — falling through to LLM planner`);
+      // fall through to strict command parsing. Legacy freeform planning is opt-in below.
+      console.log(`[assistant] showcase fast path produced 0 ops and 0 placements — falling through to strict command parser`);
+    }
+
+    progress?.("Trying strict command parsing", "Using AI only to classify the request, not to edit the schedule.");
+    const aiCommandResult = await aiScheduleCommandParser({
+      apiKey: options.apiKey,
+      model,
+      temperature,
+      userText: lastUserQuery,
+      worldSummary: scheduleCommandWorldSummary({
+        schedule,
+        activeFilters: mergedFilters,
+        selectedRoutineCount: filteredEntryIds.length,
+      }),
+    });
+    if (aiCommandResult.status === "ERROR") {
+      return { error: aiCommandResult.error, status: aiCommandResult.httpStatus };
+    }
+    if (aiCommandResult.status === "CLARIFY") {
+      const responseMs = Date.now() - reqStart;
+      return {
+        reply:
+          aiCommandResult.clarificationSession?.question ??
+          aiCommandResult.clarificationQuestion ??
+          "I need one more detail before I can preview that change.",
+        operations: [],
+        querySource: "gate",
+        needsClarification: true,
+        activeFilters: mergedFilters,
+        filteredEntryIds,
+        responseMs,
+        promptMode,
+        clarificationSession: aiCommandResult.clarificationSession,
+        commandType: aiCommandResult.command?.type,
+        parseSource: "strict_ai",
+      };
+    }
+    if (aiCommandResult.status === "COMMAND") {
+      const resolvedCommand = resolveCommandEntities(aiCommandResult.command, schedule);
+      if (resolvedCommand.status === "CLARIFY") {
+        const responseMs = Date.now() - reqStart;
+        const clarificationSession = createClarificationSession({
+          originalText: resolvedCommand.command.originalText,
+          command: resolvedCommand.command,
+          ambiguities: resolvedCommand.ambiguities,
+        });
+        return {
+          reply: clarificationSession.question,
+          operations: [],
+          querySource: "gate",
+          needsClarification: true,
+          activeFilters: mergedFilters,
+          filteredEntryIds,
+          responseMs,
+          promptMode,
+          clarificationSession,
+          commandType: resolvedCommand.command.type,
+          parseSource: "strict_ai",
+        };
+      }
+      if (resolvedCommand.status === "RESOLVED") {
+        const patch = scheduleCommandToPatch({
+          command: resolvedCommand.command,
+          schedule,
+          timeZone,
+        });
+        const responseMs = Date.now() - reqStart;
+        console.log(
+          `[assistant] source=ai/command type=${resolvedCommand.command.type} blocked=${patch.blocked} ops=${patch.assistantOperations?.length ?? 0} ms=${responseMs}`
+        );
+        return {
+          reply: patchReply(patch),
+          operations: patch.assistantOperations ?? [],
+          querySource: "local",
+          activeFilters: mergedFilters,
+          filteredEntryIds,
+          responseMs,
+          promptMode,
+          schedulePatch: patch,
+          commandType: resolvedCommand.command.type,
+          parseSource: "strict_ai",
+        };
+      }
+    }
+    const aiUnsupportedReason =
+      aiCommandResult.status === "UNSUPPORTED" ? aiCommandResult.reason : undefined;
+
+    if (!legacyMutationPlannerEnabled()) {
+      const responseMs = Date.now() - reqStart;
+      return {
+        reply: unsupportedCommandReply(aiUnsupportedReason ?? localParseUnsupportedReason),
+        operations: [],
+        querySource: "gate",
+        activeFilters: mergedFilters,
+        filteredEntryIds,
+        responseMs,
+        promptMode,
+        parseSource: "unsupported",
+      };
     }
 
     const plannerSystem = buildPlannerSystemPrompt(
@@ -957,6 +1647,10 @@ export async function runAssistantPipeline(
       plannerCtx.topologySummary || undefined
     );
 
+    progress?.("Asking the schedule planner", "The model is reasoning over the scoped schedule rows.");
+    console.warn(
+      `[assistant] source=legacy-planner enabled=true query="${lastUserQuery.slice(0, 120)}"`
+    );
     const plannerResult = await callPlannerLLM(
       options.apiKey,
       model,
@@ -971,11 +1665,17 @@ export async function runAssistantPipeline(
 
     // Validate against the FULL schedule — not contextRows — so swaps between
     // any two valid entries are accepted regardless of LLM context scoping.
+    const validationConstraints = {
+      ...(schedulingGoals?.constraints ?? {}),
+      ...(mergedFilters.dayKeys?.length ? { dayKeys: mergedFilters.dayKeys } : {}),
+      ...(mergedFilters.stages?.length === 1 ? { stageNums: mergedFilters.stages } : {}),
+    };
     const { valid, rejected } = validatePlan(
       plannerResult.plan,
       schedule,
-      schedulingGoals?.constraints
+      validationConstraints
     );
+    progress?.("Validating the plan", "Checking IDs, same-day swaps, and requested constraints.");
     const operations = planToOps(valid);
     const reply = generateReplyFromPlan(plannerResult.plan, valid, rejected);
 
@@ -1007,6 +1707,8 @@ export async function runAssistantPipeline(
       plannerTokenUsage,
       // tokenUsage mirrors plannerTokenUsage so aggregate metrics remain consistent
       tokenUsage: plannerTokenUsage,
+      parseSource: "legacy_planner",
+      legacyPlannerUsed: true,
     };
   }
 
@@ -1035,11 +1737,31 @@ ${messages
   .join("\n")}`;
 
   const useStream = options.stream !== false;
+  progress?.("Asking the schedule assistant", "Preparing a concise answer from the visible schedule context.");
   const aiResult = useStream
     ? await callOpenAiToolStream(options.apiKey, model, temperature, system, userBlock, options.callbacks)
     : await callOpenAiToolNoStream(options.apiKey, model, temperature, system, userBlock);
 
   if (!aiResult.ok) {
+    if (/could not parse tool call arguments/i.test(aiResult.error)) {
+      recordAssistantEvent({
+        type: "strict_ai_malformed_output",
+        parseSource: "unsupported",
+        promptText: lastUserQuery,
+        promptNeedsEvalCoverage: true,
+        metadata: { source: "retrieval_tool_parser" },
+      });
+      return {
+        reply: unsupportedCommandReply("I could not safely parse that assistant response."),
+        operations: [],
+        querySource: "gate",
+        activeFilters: mergedFilters,
+        filteredEntryIds,
+        responseMs: Date.now() - reqStart,
+        promptMode,
+        parseSource: "unsupported",
+      };
+    }
     return { error: aiResult.error, status: aiResult.status };
   }
 

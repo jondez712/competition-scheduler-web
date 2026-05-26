@@ -105,6 +105,8 @@ export type SchedulingConstraint = {
   sameDivisionCategoryOnly?: boolean;
   /** Only operate on these calendar days. */
   dayKeys?: string[];
+  /** Only operate on these stages. */
+  stageNums?: number[];
   /** Only operate on routines from these studios. */
   studioScope?: string[];
 };

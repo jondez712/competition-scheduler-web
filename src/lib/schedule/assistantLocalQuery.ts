@@ -1,5 +1,6 @@
 import type { ScheduledRoutine } from "@/lib/schedule/types";
 import type { ScheduleQueryFilters } from "@/lib/schedule/assistantIntentFilter";
+import { parseTimePoint } from "@/lib/schedule/assistantGoalExtract";
 
 // ---------------------------------------------------------------------------
 // Intent types
@@ -93,6 +94,18 @@ interface TimeWindow {
   beforeMinutes?: number;
 }
 
+function parseWindowPoint(raw: string): number | null {
+  const parsed = parseTimePoint(raw);
+  if (parsed !== null) return parsed;
+
+  const m = /^(\d{1,2})(?::(\d{2}))?$/.exec(raw.trim());
+  if (!m) return null;
+  const h = parseInt(m[1]!, 10);
+  const min = m[2] ? parseInt(m[2], 10) : 0;
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+
 export function parseTimeWindow(query: string): TimeWindow | null {
   const q = query.toLowerCase();
 
@@ -103,26 +116,18 @@ export function parseTimeWindow(query: string): TimeWindow | null {
   if (/\bevening\b/.test(q)) return { afterMinutes: 1020 };
   if (/\bnight\b/.test(q)) return { afterMinutes: 1080 };
 
-  // "after N pm" / "after N am"
-  const afterMatch = /after\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/.exec(q);
+  // "after 9am" / "after 9a" / "after 9:30p"
+  const afterMatch = /after\s+(\d{1,2}(?::\d{2})?\s*[ap]m?|\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/.exec(q);
   if (afterMatch) {
-    let h = parseInt(afterMatch[1]!, 10);
-    const min = afterMatch[2] ? parseInt(afterMatch[2], 10) : 0;
-    const ampm = afterMatch[3];
-    if (ampm === "pm" && h < 12) h += 12;
-    if (ampm === "am" && h === 12) h = 0;
-    return { afterMinutes: h * 60 + min };
+    const parsed = parseWindowPoint(afterMatch[1]!);
+    if (parsed !== null) return { afterMinutes: parsed };
   }
 
-  // "before N pm"
-  const beforeMatch = /before\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/.exec(q);
+  // "before 2pm" / "before 2p" / "before 11:30a"
+  const beforeMatch = /before\s+(\d{1,2}(?::\d{2})?\s*[ap]m?|\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/.exec(q);
   if (beforeMatch) {
-    let h = parseInt(beforeMatch[1]!, 10);
-    const min = beforeMatch[2] ? parseInt(beforeMatch[2], 10) : 0;
-    const ampm = beforeMatch[3];
-    if (ampm === "pm" && h < 12) h += 12;
-    if (ampm === "am" && h === 12) h = 0;
-    return { beforeMinutes: h * 60 + min };
+    const parsed = parseWindowPoint(beforeMatch[1]!);
+    if (parsed !== null) return { beforeMinutes: parsed };
   }
 
   return null;

@@ -89,6 +89,9 @@ export type ScheduledRoutine = {
   studioName: string;
   studioCode: string;
   stageNum: number;
+  originalStageNum?: number;
+  originalStageId?: string;
+  originalStageName?: string;
   clusterIndex: string;
   calendarDayKey: string;
   start: Date;

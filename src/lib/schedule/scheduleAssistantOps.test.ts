@@ -29,7 +29,7 @@ function row(partial: Partial<ScheduledRoutine> & Pick<ScheduledRoutine, "schedu
 }
 
 describe("applyScheduleAssistantOps", () => {
-  it("swaps by entry id on same day", () => {
+  it("swaps by entry id on same day and same stage", () => {
     const a = row({
       scheduleEntryId: "ea",
       routineNumber: "10",
@@ -40,20 +40,21 @@ describe("applyScheduleAssistantOps", () => {
     const b = row({
       scheduleEntryId: "eb",
       routineNumber: "20",
-      stageNum: 2,
-      start: new Date("2026-03-01T18:00:00Z"),
-      end: new Date("2026-03-01T18:05:00Z"),
+      stageNum: 1,
+      start: new Date("2026-03-01T18:06:00Z"),
+      end: new Date("2026-03-01T18:11:00Z"),
     });
     const { next, applied, skipped } = applyScheduleAssistantOps([a, b], [
       { op: "swap_by_entry_id", entryIdA: "ea", entryIdB: "eb" },
     ]);
     expect(skipped).toHaveLength(0);
     expect(applied).toHaveLength(1);
-    expect(next.find((r) => r.scheduleEntryId === "ea")!.stageNum).toBe(2);
+    expect(next.find((r) => r.scheduleEntryId === "ea")!.stageNum).toBe(1);
     expect(next.find((r) => r.scheduleEntryId === "eb")!.stageNum).toBe(1);
+    expect(next.find((r) => r.scheduleEntryId === "ea")!.start.getTime()).toBe(b.start.getTime());
   });
 
-  it("resolves swap_by_routine_numbers", () => {
+  it("resolves swap_by_routine_numbers on the same stage", () => {
     const a = row({
       scheduleEntryId: "ea",
       routineNumber: "12",
@@ -64,7 +65,7 @@ describe("applyScheduleAssistantOps", () => {
       scheduleEntryId: "eb",
       routineNumber: "15",
       calendarDayKey: "2026-03-01",
-      stageNum: 2,
+      stageNum: 1,
     });
     const { next, skipped } = applyScheduleAssistantOps([a, b], [
       {
@@ -75,7 +76,7 @@ describe("applyScheduleAssistantOps", () => {
       },
     ]);
     expect(skipped).toHaveLength(0);
-    expect(next.find((r) => r.scheduleEntryId === "ea")!.stageNum).toBe(2);
+    expect(next.find((r) => r.scheduleEntryId === "ea")!.stageNum).toBe(1);
   });
 
   it("skips swap when either studio is locked", () => {
@@ -91,7 +92,7 @@ describe("applyScheduleAssistantOps", () => {
       scheduleEntryId: "eb",
       studioName: "Beta",
       routineNumber: "20",
-      stageNum: 2,
+      stageNum: 1,
       start: new Date("2026-03-01T18:00:00Z"),
       end: new Date("2026-03-01T18:05:00Z"),
     });

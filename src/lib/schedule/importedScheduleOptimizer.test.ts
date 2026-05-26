@@ -198,7 +198,7 @@ describe("studioStageAlternationPenalty", () => {
 
 // ─── Phase 2 studio clustering ────────────────────────────────────────────────
 describe("optimizeImportedSchedule — studio clustering (Phase 2)", () => {
-  it("reduces stage transitions without introducing new errors", async () => {
+  it("preserves immutable stage assignments instead of cross-stage clustering", async () => {
     // Build a clean schedule (no conflicts) where one studio alternates stages:
     //   Studio "Cluster Test":
     //     Stage 1 at 9:00  (r_a)
@@ -235,11 +235,12 @@ describe("optimizeImportedSchedule — studio clustering (Phase 2)", () => {
 
     const result = await optimizeImportedSchedule(rows, { timeoutMs: 5_000 });
 
-    // Phase 2 should have reduced transitions
-    expect(result.transitionsAfter).toBeLessThan(result.transitionsBefore);
-    // Phase 2 must not introduce new errors
+    expect(result.transitionsAfter).toBeLessThanOrEqual(result.transitionsBefore);
     expect(result.errorsAfter).toBe(0);
-    // All rows preserved
     expect(result.rows).toHaveLength(rows.length);
+    for (const original of rows) {
+      const next = result.rows.find((row) => row.scheduleEntryId === original.scheduleEntryId);
+      expect(next?.stageNum).toBe(original.stageNum);
+    }
   });
 });

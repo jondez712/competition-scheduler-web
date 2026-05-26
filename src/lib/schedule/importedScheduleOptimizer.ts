@@ -276,6 +276,8 @@ export async function optimizeImportedSchedule(
           const candAnalysis = analyse(candidate, config, timeZone);
           const candScore = conflictScore(candAnalysis);
 
+          if (candAnalysis.errorCount > currentAnalysis.errorCount) continue;
+
           if (candScore < currentConflictScore) {
             current = candidate;
             currentAnalysis = candAnalysis;
@@ -309,8 +311,11 @@ export async function optimizeImportedSchedule(
     if (!improved) break;
   }
 
-  // ─── Phase 2: studio clustering, cross-stage swaps ───────────────────────
-  if (!timedOut) {
+  // ─── Phase 2: studio clustering ──────────────────────────────────────────
+  // Stage assignments are immutable after import, so the former cross-stage
+  // clustering pass is intentionally disabled.
+  const crossStageClusteringEnabled = false;
+  if (!timedOut && crossStageClusteringEnabled) {
     // Find studios+days that still have ≥ 2 stage transitions
     const byStudioDay = new Map<string, ScheduledRoutine[]>();
     for (const r of current) {

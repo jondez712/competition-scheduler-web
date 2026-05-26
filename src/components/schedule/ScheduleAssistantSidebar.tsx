@@ -1,20 +1,58 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ScheduledRoutine } from "@/lib/schedule/types";
 import {
   fitJsonToCharBudget,
   pruneHitchkickPayloadForAssistant,
 } from "@/lib/schedule/assistantPayloadPrune";
 import { studioLockKeysFromList } from "@/lib/schedule/studioLock";
-import { applyScheduleAssistantOps, type ScheduleAssistantOp } from "@/lib/schedule/scheduleAssistantOps";
+import type { ScheduleAssistantOp } from "@/lib/schedule/scheduleAssistantOps";
+import type { SchedulePatch } from "@/lib/schedule/patches/SchedulePatch";
+import {
+  appendPatchHistoryEntry,
+  createPatchHistoryEntry,
+  emptyPatchHistory,
+  getLastAppliedPatch,
+  markPatchApplied,
+  type PatchHistoryState,
+} from "@/lib/schedule/patches/PatchHistory";
+import { undoLastPatch } from "@/lib/schedule/patches/undoLastPatch";
+import {
+  groupPatchReviewWarningsForUser,
+  summarizePatchForUser,
+  summarizePatchWarningsForUser,
+  summarizeUndoForUser,
+} from "@/lib/schedule/patches/patchSummaries";
 import type { ScheduleQueryFilters } from "@/lib/schedule/assistantIntentFilter";
 import type { ShowcaseFulfillmentMetrics } from "@/lib/schedule/assistantGoalModel";
+import type { ClarificationSession } from "@/lib/schedule/assistant/clarificationSession";
+import type { ScheduleCommandType } from "@/lib/schedule/assistant/commandTypes";
+import {
+  applyAssistantPreview,
+  assistantApplyButtonLabel,
+  assistantDebugMetadataText,
+  assistantDebugModeEnabled,
+  assistantShadowModeBannerText,
+  assistantShadowModeEnabled,
+} from "@/lib/schedule/assistant/assistantShadowMode";
+import {
+  recordAssistantEvent,
+  type AssistantParseSource,
+} from "@/lib/schedule/assistant/assistantTelemetry";
 
 type ChatMessage = {
   role: "user" | "assistant";
   content: string;
-  querySource?: "local" | "ai";
+  querySource?: "local" | "ai" | "gate";
+  commandType?: ScheduleCommandType;
+  parseSource?: AssistantParseSource;
+  shadowMode?: boolean;
+};
+
+type AssistantProgressItem = {
+  label: string;
+  detail?: string;
 };
 
 type AssistantActiveContext = {
@@ -159,11 +197,37 @@ export function ScheduleAssistantSidebar({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [progressItems, setProgressItems] = useState<AssistantProgressItem[]>([]);
   const [lastError, setLastError] = useState<string | null>(null);
   /** Active filter context from the most recent assistant response. */
   const [activeContext, setActiveContext] = useState<AssistantActiveContext | null>(null);
   /** Running tally of local vs AI responses for the current session. */
   const [stats, setStats] = useState({ local: 0, ai: 0 });
+  const [patchHistory, setPatchHistory] = useState<PatchHistoryState>(() => emptyPatchHistory());
+  const [activeClarificationSession, setActiveClarificationSession] =
+    useState<ClarificationSession | null>(null);
+  const assistantDebugMode = useMemo(
+    () =>
+      assistantDebugModeEnabled(
+        {
+          NEXT_PUBLIC_SCHEDULE_ASSISTANT_DEBUG:
+            process.env.NEXT_PUBLIC_SCHEDULE_ASSISTANT_DEBUG,
+        },
+        typeof window !== "undefined" ? window.location.search : undefined
+      ),
+    []
+  );
+  const clientShadowMode = useMemo(
+    () =>
+      assistantShadowModeEnabled({
+        NEXT_PUBLIC_SCHEDULE_ASSISTANT_SHADOW_MODE:
+          process.env.NEXT_PUBLIC_SCHEDULE_ASSISTANT_SHADOW_MODE,
+      }),
+    []
+  );
+  const [serverShadowMode, setServerShadowMode] = useState<boolean | null>(null);
+  const effectiveShadowMode = clientShadowMode || serverShadowMode === true;
+  const shadowModeKnown = clientShadowMode || serverShadowMode !== null;
   /**
    * Pending bulk operations waiting for user confirmation.
    * Set when the AI returns >1 operation; cleared on apply or cancel.
@@ -173,17 +237,52 @@ export function ScheduleAssistantSidebar({
     reply: string;
     /** Snapshot of schedule rows at the time ops were proposed (for diff labeling). */
     snapshotRows: ScheduledRoutine[];
+    patch?: SchedulePatch;
     showcaseFulfillment?: ShowcaseFulfillmentMetrics;
+    promptText: string;
+    commandType?: ScheduleCommandType;
+    parseSource?: AssistantParseSource;
+    shadowMode?: boolean;
   } | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lastAppliedPatch = getLastAppliedPatch(patchHistory);
+  const messagesScrollRef = useRef<HTMLDivElement>(null);
+  const pageScrollTargetRef = useRef<{ x: number; y: number } | null>(null);
 
   const canSend = schedule.length > 0 && !loading && !disabledReason;
   const lockedStudioKeys = useMemo(() => studioLockKeysFromList(lockedStudios), [lockedStudios]);
   const sendRef = useRef<(() => Promise<void>) | undefined>(undefined);
+  const rememberPageScroll = useCallback(() => {
+    pageScrollTargetRef.current = { x: window.scrollX, y: window.scrollY };
+  }, []);
+  const restorePageScroll = useCallback(() => {
+    const target = pageScrollTargetRef.current;
+    if (!target) return;
+    window.scrollTo(target.x, target.y);
+    window.requestAnimationFrame(() => window.scrollTo(target.x, target.y));
+  }, []);
+
+  useLayoutEffect(() => {
+    const scroller = messagesScrollRef.current;
+    if (!scroller) return;
+    const target = pageScrollTargetRef.current ?? { x: window.scrollX, y: window.scrollY };
+    scroller.scrollTop = scroller.scrollHeight;
+    window.scrollTo(target.x, target.y);
+  }, [messages, loading, progressItems]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, loading]);
+    let cancelled = false;
+    fetch("/api/schedule/assistant", { method: "GET", cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((status: { shadowMode?: boolean } | null) => {
+        if (!cancelled) setServerShadowMode(status?.shadowMode === true);
+      })
+      .catch(() => {
+        if (!cancelled) setServerShadowMode(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!pendingMessage?.text) return;
@@ -199,8 +298,18 @@ export function ScheduleAssistantSidebar({
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || !canSend) return;
+    rememberPageScroll();
+    recordAssistantEvent({
+      type: "prompt_received",
+      promptText: text,
+      metadata: {
+        competitionId,
+        scheduleRowCount: schedule.length,
+      },
+    });
     setInput("");
     setLastError(null);
+    setProgressItems([{ label: "Sending your request", detail: "Packaging the schedule context." }]);
     const nextTranscript: ChatMessage[] = [...messages, { role: "user", content: text }];
     setMessages(nextTranscript);
     setLoading(true);
@@ -218,6 +327,9 @@ export function ScheduleAssistantSidebar({
       if (activeContext) {
         payload.activeFilters = activeContext.filters;
         payload.activeEntryIds = activeContext.entryIds;
+      }
+      if (activeClarificationSession) {
+        payload.clarificationSession = activeClarificationSession;
       }
 
       const hkWire = hitchkickPayloadForAssistantWire(hitchkickPayload);
@@ -277,8 +389,14 @@ export function ScheduleAssistantSidebar({
       let streamError: string | null = null;
       let nextActiveFilters: ScheduleQueryFilters | undefined;
       let nextFilteredEntryIds: string[] | undefined;
-      let nextQuerySource: "local" | "ai" | undefined;
+      let nextQuerySource: "local" | "ai" | "gate" | undefined;
       let nextShowcaseFulfillment: ShowcaseFulfillmentMetrics | undefined;
+      let nextSchedulePatch: SchedulePatch | undefined;
+      let nextClarificationSession: ClarificationSession | undefined;
+      let nextCommandType: ScheduleCommandType | undefined;
+      let nextParseSource: AssistantParseSource | undefined;
+      let nextLegacyPlannerUsed = false;
+      let nextShadowMode = false;
 
       outer: while (true) {
         const { done, value } = await reader.read();
@@ -297,14 +415,32 @@ export function ScheduleAssistantSidebar({
               operations?: ScheduleAssistantOp[];
               error?: string;
               raw?: string;
+              label?: string;
+              detail?: string;
               activeFilters?: ScheduleQueryFilters;
               filteredEntryIds?: string[];
-              querySource?: "local" | "ai";
+              querySource?: "local" | "ai" | "gate";
               responseMs?: number;
               showcaseFulfillment?: ShowcaseFulfillmentMetrics;
+              schedulePatch?: SchedulePatch;
+              clarificationSession?: ClarificationSession;
+              commandType?: ScheduleCommandType;
+              parseSource?: AssistantParseSource;
+              legacyPlannerUsed?: boolean;
+              shadowMode?: boolean;
             };
             if (evt.type === "chunk") {
               // Tool-call argument chunks — no visible content to render yet.
+            } else if (evt.type === "progress" && evt.label) {
+              const nextItem = {
+                label: evt.label,
+                detail: typeof evt.detail === "string" ? evt.detail : undefined,
+              };
+              setProgressItems((items) => {
+                const last = items[items.length - 1];
+                if (last?.label === nextItem.label && last.detail === nextItem.detail) return items;
+                return [...items, nextItem].slice(-5);
+              });
             } else if (evt.type === "done") {
               reply = typeof evt.reply === "string" ? evt.reply : "";
               ops = Array.isArray(evt.operations) ? evt.operations : [];
@@ -312,6 +448,15 @@ export function ScheduleAssistantSidebar({
               nextFilteredEntryIds = evt.filteredEntryIds;
               nextQuerySource = evt.querySource;
               nextShowcaseFulfillment = evt.showcaseFulfillment;
+              nextSchedulePatch = evt.schedulePatch;
+              nextClarificationSession = evt.clarificationSession;
+              nextCommandType = evt.commandType;
+              nextParseSource = evt.parseSource;
+              nextLegacyPlannerUsed = evt.legacyPlannerUsed === true;
+              nextShadowMode = evt.shadowMode === true;
+              if (typeof evt.shadowMode === "boolean") {
+                setServerShadowMode(evt.shadowMode);
+              }
               break outer;
             } else if (evt.type === "error") {
               streamError = evt.error ?? "Unknown assistant error";
@@ -341,37 +486,134 @@ export function ScheduleAssistantSidebar({
       }
 
       // Track local vs AI stats for the session.
-      if (nextQuerySource) {
-        setStats((s) => ({ ...s, [nextQuerySource!]: s[nextQuerySource!] + 1 }));
+      if (nextQuerySource === "local" || nextQuerySource === "ai") {
+        setStats((s) => ({ ...s, [nextQuerySource]: s[nextQuerySource] + 1 }));
+      }
+      setActiveClarificationSession(nextClarificationSession ?? null);
+
+      if (nextLegacyPlannerUsed) {
+        recordAssistantEvent({
+          type: "legacy_planner_used",
+          promptText: text,
+          parseSource: nextParseSource ?? "legacy_planner",
+          legacyPlannerUsed: true,
+        });
+      }
+      if (nextCommandType) {
+        recordAssistantEvent({
+          type: "command_parsed",
+          promptText: text,
+          commandType: nextCommandType,
+          parseSource: nextParseSource,
+        });
+      }
+      if (nextClarificationSession) {
+        recordAssistantEvent({
+          type: "clarification_requested",
+          promptText: text,
+          commandType: nextCommandType,
+          parseSource: nextParseSource ?? "gate",
+          clarificationRequested: true,
+        });
+      }
+      if (nextParseSource === "unsupported") {
+        recordAssistantEvent({
+          type: "unsupported_request",
+          promptText: text,
+          parseSource: "unsupported",
+          unsupportedRequest: true,
+          promptNeedsEvalCoverage: true,
+        });
       }
 
       const infoOnly = looksLikeScheduleInfoOnly(text);
       const assistantBody = reply.trim();
+      const assistantDebugFields = {
+        querySource: nextQuerySource,
+        commandType: nextCommandType,
+        parseSource: nextParseSource,
+        shadowMode: effectiveShadowMode || nextShadowMode,
+      };
 
-      if (ops.length > 0 && infoOnly) {
+      const hasPatchChanges = (nextSchedulePatch?.changes.length ?? 0) > 0;
+      if ((ops.length > 0 || hasPatchChanges) && infoOnly) {
         // Sounds like a question — don't apply, just show the reply.
         setMessages((m) => [
           ...m,
           {
             role: "assistant",
             content: `${assistantBody}\n\n— Schedule not changed: that sounded like a question. Say explicitly which routines to swap if you want edits.`.trim(),
-            querySource: nextQuerySource,
+            ...assistantDebugFields,
           },
         ]);
-      } else if (ops.length > 0) {
+      } else if (ops.length > 0 || hasPatchChanges) {
         // Any proposed change — show preview card first, require explicit confirmation.
+        const previewPatch = nextSchedulePatch;
+        if (previewPatch) {
+          const warningGroups = groupPatchReviewWarningsForUser(previewPatch);
+          recordAssistantEvent({
+            type: "patch_preview_created",
+            promptText: text,
+            commandType: nextCommandType,
+            parseSource: nextParseSource,
+            patchPreviewCreated: true,
+            blockedPatch: previewPatch.blocked,
+            warningGroupCount: warningGroups.length,
+            conflictCount:
+              previewPatch.conflictsCreated.length + previewPatch.conflictsResolved.length,
+            warningTypes: warningGroups.map((group) => group.title),
+            blockedReasons: previewPatch.blockReasons,
+          });
+          if (previewPatch.blocked) {
+            recordAssistantEvent({
+              type: "blocked_patch",
+              promptText: text,
+              commandType: nextCommandType,
+              parseSource: nextParseSource,
+              blockedPatch: true,
+              blockedReasons: previewPatch.blockReasons,
+            });
+          }
+        } else if (ops.length > 0) {
+          recordAssistantEvent({
+            type: "patch_preview_created",
+            promptText: text,
+            commandType: nextCommandType,
+            parseSource: nextParseSource,
+            patchPreviewCreated: true,
+            warningGroupCount: 0,
+            conflictCount: 0,
+          });
+        }
+        if (previewPatch) {
+          setPatchHistory((history) =>
+            appendPatchHistoryEntry(
+              history,
+              createPatchHistoryEntry(previewPatch, {
+                commandId: previewPatch.commandId,
+                source: "assistant",
+                originalText: text,
+              })
+            )
+          );
+        }
         setPendingOps({
           ops: ops as ScheduleAssistantOp[],
           reply: assistantBody,
           snapshotRows: schedule,
+          patch: previewPatch,
           showcaseFulfillment: nextShowcaseFulfillment,
+          promptText: text,
+          commandType: nextCommandType,
+          parseSource: nextParseSource,
+          shadowMode: effectiveShadowMode || nextShadowMode,
         });
         setMessages((m) => [
           ...m,
           {
             role: "assistant",
             content: assistantBody,
-            querySource: nextQuerySource,
+            ...assistantDebugFields,
           },
         ]);
       } else {
@@ -380,7 +622,7 @@ export function ScheduleAssistantSidebar({
           {
             role: "assistant",
             content: assistantBody,
-            querySource: nextQuerySource,
+            ...assistantDebugFields,
           },
         ]);
       }
@@ -393,18 +635,22 @@ export function ScheduleAssistantSidebar({
       ]);
     } finally {
       setLoading(false);
+      setProgressItems([]);
     }
   }, [
     activeContext,
+    activeClarificationSession,
     canSend,
     competitionId,
     competitionName,
+    effectiveShadowMode,
     hitchkickPayload,
     input,
     lockedStudioKeys,
     lockedStudios,
     messages,
     onScheduleReplace,
+    rememberPageScroll,
     schedule,
     timeZone,
   ]);
@@ -413,11 +659,14 @@ export function ScheduleAssistantSidebar({
 
   return (
     <aside
-      className={`shrink-0 border-zinc-200 bg-zinc-50/80 dark:border-zinc-800 dark:bg-zinc-950/50 lg:sticky lg:top-4 lg:self-start ${
+      className={`shrink-0 [overflow-anchor:none] border-zinc-200 bg-zinc-50/80 dark:border-zinc-800 dark:bg-zinc-950/50 lg:sticky lg:top-4 lg:self-start ${
         open
           ? "flex h-[min(72dvh,620px)] w-full max-w-full flex-col border-t p-4 lg:mt-0 lg:h-[calc(100vh-2rem)] lg:w-[min(100vw-2rem,320px)] lg:max-w-[320px] lg:border-l lg:border-t-0"
           : "w-12 border-l p-2"
       }`}
+      onPointerDownCapture={rememberPageScroll}
+      onFocusCapture={restorePageScroll}
+      onClickCapture={restorePageScroll}
     >
       <div className={`flex shrink-0 items-center ${open ? "justify-between gap-2" : "justify-center"}`}>
         {open ? (
@@ -450,6 +699,20 @@ export function ScheduleAssistantSidebar({
           </button>
         )}
       </div>
+
+      {open ? (
+        <p
+          className={`mt-3 rounded-md border px-2 py-1.5 text-[11px] font-semibold ${
+            effectiveShadowMode
+              ? "border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-700 dark:bg-sky-950/40 dark:text-sky-200"
+              : "border-zinc-200 bg-white text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+          }`}
+        >
+          {shadowModeKnown
+            ? assistantShadowModeBannerText(effectiveShadowMode)
+            : "Checking assistant apply mode..."}
+        </p>
+      ) : null}
 
       {open ? (
         <div className="mt-3 flex min-h-0 flex-1 flex-col gap-0">
@@ -486,7 +749,10 @@ export function ScheduleAssistantSidebar({
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-900">
-            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">
+            <div
+              ref={messagesScrollRef}
+              className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain [overflow-anchor:none]"
+            >
               {messages.length === 0 ? (
                 <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 py-10 text-center">
                   <p className="text-[15px] font-medium tracking-tight text-zinc-800 dark:text-zinc-100">
@@ -522,17 +788,76 @@ export function ScheduleAssistantSidebar({
                         ) : null}
                       </div>
                       <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+                      {assistantDebugMode &&
+                      msg.role === "assistant" &&
+                      (msg.commandType || msg.parseSource || msg.querySource || msg.shadowMode !== undefined) ? (
+                        <pre className="mt-2 whitespace-pre-wrap rounded border border-zinc-200 bg-white/70 px-2 py-1 text-[10px] leading-snug text-zinc-500 dark:border-zinc-700 dark:bg-zinc-950/40 dark:text-zinc-400">
+                          {assistantDebugMetadataText({
+                            commandType: msg.commandType,
+                            parseSource: msg.parseSource,
+                            querySource: msg.querySource,
+                            shadowMode: msg.shadowMode ?? effectiveShadowMode,
+                          })}
+                        </pre>
+                      ) : null}
                     </div>
                   ))}
-                  <div ref={messagesEndRef} className="h-px shrink-0" aria-hidden />
+                  {loading ? (
+                    <div className="mr-4 rounded-md border border-pink-100 bg-pink-50/80 px-2 py-2 text-zinc-800 shadow-sm dark:border-pink-900/60 dark:bg-pink-950/25 dark:text-zinc-100">
+                      <div className="mb-1 flex items-center gap-2">
+                        <span className="h-2 w-2 animate-pulse rounded-full bg-pink-500" aria-hidden />
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-pink-700 dark:text-pink-300">
+                          Assistant is working
+                        </span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {progressItems.length > 0 ? (
+                          progressItems.map((item, idx) => {
+                            const isLatest = idx === progressItems.length - 1;
+                            return (
+                              <div key={`${item.label}-${idx}`} className="flex gap-2 text-xs">
+                                <span
+                                  className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${
+                                    isLatest
+                                      ? "bg-pink-500"
+                                      : "bg-emerald-500 dark:bg-emerald-400"
+                                  }`}
+                                  aria-hidden
+                                />
+                                <div className="min-w-0">
+                                  <div className={isLatest ? "font-medium" : "text-zinc-500 dark:text-zinc-400"}>
+                                    {item.label}
+                                  </div>
+                                  {item.detail ? (
+                                    <div className="mt-0.5 text-[11px] leading-snug text-zinc-500 dark:text-zinc-400">
+                                      {item.detail}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              </div>
+                            );
+                          })
+                        ) : (
+                          <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                            Getting started...
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               )}
             </div>
 
             {pendingOps ? (
               <div className="shrink-0 border-t border-amber-200 bg-amber-50/80 p-3 dark:border-amber-700 dark:bg-amber-950/30">
+                {pendingOps.shadowMode ? (
+                  <p className="mb-2 rounded border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-800 dark:border-sky-700 dark:bg-sky-950/40 dark:text-sky-200">
+                    {assistantShadowModeBannerText(true)}
+                  </p>
+                ) : null}
                 <p className="mb-2 text-[11px] font-semibold text-amber-900 dark:text-amber-200">
-                  Planned changes ({pendingOps.ops.length})
+                  Planned changes ({pendingOps.patch?.changes.length ?? pendingOps.ops.length})
                   {pendingOps.showcaseFulfillment &&
                   pendingOps.showcaseFulfillment.fulfilledBlocks <
                     pendingOps.showcaseFulfillment.requestedBlocks
@@ -553,41 +878,95 @@ export function ScheduleAssistantSidebar({
                       : ""}
                   </p>
                 ) : null}
-                <div className="mb-3 max-h-32 overflow-y-auto rounded border border-amber-200 bg-white/80 p-1.5 text-[10px] text-zinc-700 dark:border-amber-700 dark:bg-zinc-900/60 dark:text-zinc-300">
-                  {pendingOps.ops.map((op, i) => {
-                    if (op.op !== "swap_by_entry_id") {
-                      return <div key={i} className="py-0.5">{i + 1}. {op.op}</div>;
-                    }
-                    const byId = new Map(pendingOps.snapshotRows.map((r) => [r.scheduleEntryId, r]));
-                    const a = byId.get(op.entryIdA);
-                    const b = byId.get(op.entryIdB);
-                    return (
-                      <div key={i} className="border-b border-amber-100 py-0.5 last:border-0 dark:border-amber-800">
-                        {i + 1}.{" "}
-                        {a ? `#${a.routineNumber} "${a.routineTitle}" (${a.calendarDayKey}, Stage ${a.stageNum})` : op.entryIdA}
-                        {" ↔ "}
-                        {b ? `#${b.routineNumber} "${b.routineTitle}" (${b.calendarDayKey}, Stage ${b.stageNum})` : op.entryIdB}
-                      </div>
-                    );
-                  })}
-                </div>
+                {pendingOps.patch ? (
+                  <div className="mb-2 rounded border border-amber-200 bg-white/70 p-1.5 text-[10px] leading-snug text-zinc-700 dark:border-amber-700 dark:bg-zinc-900/50 dark:text-zinc-300">
+                    <div className="whitespace-pre-wrap">
+                      {summarizePatchForUser(pendingOps.patch, { includeSummary: false })}
+                    </div>
+                    {pendingOps.patch.warnings.length > 0 ? (
+                      <details className="mt-2 border-t border-amber-100 pt-1 dark:border-amber-800">
+                        <summary className="cursor-pointer text-[10px] font-semibold text-amber-800 dark:text-amber-300">
+                          Show raw warning details ({pendingOps.patch.warnings.length})
+                        </summary>
+                        <div className="mt-1 max-h-28 overflow-y-auto whitespace-pre-wrap text-[9px] leading-snug text-zinc-500 dark:text-zinc-400">
+                          {pendingOps.patch.warnings.map((warning, i) => `${i + 1}. ${warning}`).join("\n")}
+                        </div>
+                      </details>
+                    ) : null}
+                  </div>
+                ) : null}
+                {pendingOps.patch ? null : (
+                  <div className="mb-3 max-h-32 overflow-y-auto rounded border border-amber-200 bg-white/80 p-1.5 text-[10px] text-zinc-700 dark:border-amber-700 dark:bg-zinc-900/60 dark:text-zinc-300">
+                    {pendingOps.ops.map((op, i) => {
+                      if (op.op !== "swap_by_entry_id") {
+                        return <div key={i} className="py-0.5">{i + 1}. {op.op}</div>;
+                      }
+                      const byId = new Map(pendingOps.snapshotRows.map((r) => [r.scheduleEntryId, r]));
+                      const a = byId.get(op.entryIdA);
+                      const b = byId.get(op.entryIdB);
+                      return (
+                        <div key={i} className="border-b border-amber-100 py-0.5 last:border-0 dark:border-amber-800">
+                          {i + 1}.{" "}
+                          {a ? `#${a.routineNumber} "${a.routineTitle}" (${a.calendarDayKey}, Stage ${a.stageNum})` : op.entryIdA}
+                          {" ↔ "}
+                          {b ? `#${b.routineNumber} "${b.routineTitle}" (${b.calendarDayKey}, Stage ${b.stageNum})` : op.entryIdB}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
                 <div className="flex gap-2">
                   <button
                     type="button"
                     className="flex-1 rounded-md bg-pink-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-pink-700 dark:bg-pink-700 dark:hover:bg-pink-600"
                     onClick={() => {
-                      const { ops, reply, snapshotRows } = pendingOps;
-                      const { next, applied, skipped } = applyScheduleAssistantOps(
+                      const {
+                        ops,
+                        reply,
+                        snapshotRows,
+                        patch,
+                        promptText,
+                        commandType,
+                        parseSource,
+                        shadowMode,
+                      } = pendingOps;
+                      const warningGroupCount = patch
+                        ? groupPatchReviewWarningsForUser(patch).length
+                        : undefined;
+                      const applyResult = applyAssistantPreview({
                         schedule,
                         ops,
-                        { lockedStudioKeys }
-                      );
-                      onScheduleReplace(next);
-                      let note = applied.length
-                        ? describeAppliedAssistantOps(applied, snapshotRows, timeZone)
-                        : "";
+                        patch,
+                        lockedStudioKeys,
+                        shadowMode,
+                        promptText,
+                        commandType,
+                        parseSource,
+                        warningGroupCount,
+                        conflictCount: patch
+                          ? patch.conflictsCreated.length + patch.conflictsResolved.length
+                          : undefined,
+                      });
+                      const applied = applyResult.applied;
+                      const skipped = applyResult.skipped;
+                      if (!applyResult.shadowApplied) {
+                        onScheduleReplace(applyResult.nextSchedule);
+                      }
+                      if (patch && !applyResult.shadowApplied) {
+                        setPatchHistory((history) => markPatchApplied(history, patch.patchId));
+                      }
+                      let note = applyResult.shadowApplied
+                        ? `— Shadow apply simulated ${patch ? patch.changes.length : applied.length} schedule change${(patch ? patch.changes.length : applied.length) !== 1 ? "s" : ""}. The visible schedule was not changed.`
+                        : patch
+                          ? `— Applied ${patch.changes.length} schedule change${patch.changes.length !== 1 ? "s" : ""}.`
+                          : applied.length
+                            ? describeAppliedAssistantOps(applied, snapshotRows, timeZone)
+                            : "";
                       if (skipped.length) {
                         note += `\n\n— Could not apply: ${skipped.map((s) => s.reason).join("; ")}`;
+                      }
+                      if (patch?.warnings.length) {
+                        note += `\n\n— Patch warnings:\n${summarizePatchWarningsForUser(patch.warnings)}`;
                       }
                       setMessages((m) => {
                         const last = m[m.length - 1];
@@ -602,7 +981,10 @@ export function ScheduleAssistantSidebar({
                       setPendingOps(null);
                     }}
                   >
-                    Apply {pendingOps.ops.length} change{pendingOps.ops.length !== 1 ? "s" : ""}
+                    {assistantApplyButtonLabel(
+                      pendingOps.patch?.changes.length ?? pendingOps.ops.length,
+                      pendingOps.shadowMode === true
+                    )}
                   </button>
                   <button
                     type="button"
@@ -625,6 +1007,39 @@ export function ScheduleAssistantSidebar({
                   </button>
                 </div>
               </div>
+            ) : null}
+
+            {!pendingOps && lastAppliedPatch ? (
+              <button
+                type="button"
+                className="mx-3 mb-3 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                onClick={() => {
+                  const result = undoLastPatch(schedule, patchHistory);
+                  onScheduleReplace(result.schedule);
+                  setPatchHistory(result.history);
+                  if (result.undonePatchId) {
+                    recordAssistantEvent({
+                      type: "patch_undone",
+                      patchUndone: true,
+                      metadata: {
+                        patchId: result.undonePatchId,
+                      },
+                    });
+                  }
+                  setMessages((m) => [
+                    ...m,
+                    {
+                      role: "assistant",
+                      content: result.undonePatchId
+                        ? summarizeUndoForUser(lastAppliedPatch)
+                        : result.message,
+                      querySource: "local",
+                    },
+                  ]);
+                }}
+              >
+                Undo last assistant change
+              </button>
             ) : null}
 
             <div className="shrink-0 border-t border-zinc-200 bg-zinc-50/90 p-3 dark:border-zinc-700 dark:bg-zinc-950/80">

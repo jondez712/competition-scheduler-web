@@ -7,6 +7,7 @@
  */
 import type { ScheduledRoutine } from "@/lib/schedule/types";
 import type { ScheduleQueryFilters } from "@/lib/schedule/assistantIntentFilter";
+import { hasActionableSchedulerIntent } from "@/lib/schedule/assistant/schedulerIntentVocabulary";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -255,6 +256,8 @@ function isActionableBulkPattern(
   prompt: string,
   filters: ScheduleQueryFilters
 ): boolean {
+  if (hasActionableSchedulerIntent(prompt, filters)) return true;
+
   // "start/open every stage with <studio>" — clear bulk opener intent
   const bulkOpenerPattern =
     /\b(start|open|begin)\b.{0,30}\b(every|each|all)\b.{0,30}\bstage\b/i;

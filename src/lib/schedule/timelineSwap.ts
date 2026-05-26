@@ -163,9 +163,9 @@ export function reorderTimelineInsertAtEdge(
 }
 
 /**
- * Exchange wall-clock slot (start, end, stage, day) between two routines. Metadata (title, studio,
- * roster, etc.) stays with each routine. Returns null if ids are missing or routines are on different
- * calendar days.
+ * Exchange wall-clock slot (start/end) between two routines on the same stage and day. Metadata
+ * (title, studio, roster, etc.) stays with each routine. Returns null if ids are missing or routines
+ * are on different calendar days or stages.
  */
 export function swapRoutineSlotsByEntryId(
   rows: ScheduledRoutine[],
@@ -179,37 +179,29 @@ export function swapRoutineSlotsByEntryId(
   const A = rows[ia]!;
   const B = rows[ib]!;
   if (A.calendarDayKey !== B.calendarDayKey) return null;
+  if (A.stageNum !== B.stageNum) return null;
 
   const next = [...rows];
   next[ia] = {
     ...A,
     start: B.start,
     end: B.end,
-    stageNum: B.stageNum,
-    calendarDayKey: B.calendarDayKey,
+    stageNum: A.stageNum,
+    calendarDayKey: A.calendarDayKey,
   };
   next[ib] = {
     ...B,
     start: A.start,
     end: A.end,
-    stageNum: A.stageNum,
-    calendarDayKey: A.calendarDayKey,
+    stageNum: B.stageNum,
+    calendarDayKey: B.calendarDayKey,
   };
   const preOnA = rows.filter(
     (r) => r.calendarDayKey === A.calendarDayKey && r.stageNum === A.stageNum
   );
-  const preOnB = rows.filter(
-    (r) => r.calendarDayKey === B.calendarDayKey && r.stageNum === B.stageNum
-  );
   const baseA = bucketRoutineNumberBase(preOnA);
-  const baseB = bucketRoutineNumberBase(preOnB);
 
   let result = next;
-  if (A.stageNum === B.stageNum) {
-    result = renumberStageDayBucket(result, A.calendarDayKey, A.stageNum, baseA);
-  } else {
-    result = renumberStageDayBucket(result, A.calendarDayKey, A.stageNum, baseA);
-    result = renumberStageDayBucket(result, B.calendarDayKey, B.stageNum, baseB);
-  }
+  result = renumberStageDayBucket(result, A.calendarDayKey, A.stageNum, baseA);
   return result;
 }

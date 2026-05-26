@@ -88,6 +88,13 @@ export function applyScheduleAssistantOps(
         });
         continue;
       }
+      if (rowA.stageNum !== rowB.stageNum) {
+        skipped.push({
+          op,
+          reason: `Swap rejected: routine #${rowA.routineNumber} cannot move from Stage ${rowA.stageNum} to Stage ${rowB.stageNum}. Stage assignments are fixed from the imported schedule.`,
+        });
+        continue;
+      }
       if (swapTouchesLockedStudio(rowA, rowB, lockedStudioKeys)) {
         skipped.push({ op, reason: "Swap skipped: one or both studios are locked for automated edits" });
         continue;
@@ -129,6 +136,13 @@ export function applyScheduleAssistantOps(
       const entryIdB = mb[0]!.scheduleEntryId;
       if (swapTouchesLockedStudio(ma[0]!, mb[0]!, lockedStudioKeys)) {
         skipped.push({ op, reason: "Swap skipped: one or both studios are locked for automated edits" });
+        continue;
+      }
+      if (ma[0]!.stageNum !== mb[0]!.stageNum) {
+        skipped.push({
+          op,
+          reason: `Swap rejected: routine #${ma[0]!.routineNumber} cannot move from Stage ${ma[0]!.stageNum} to Stage ${mb[0]!.stageNum}. Stage assignments are fixed from the imported schedule.`,
+        });
         continue;
       }
       const swapped = swapRoutineSlotsByEntryId(next, entryIdA, entryIdB);

@@ -17,6 +17,12 @@ describe("parseTimeWindow", () => {
     expect(tw!.afterMinutes).toBe(9 * 60);
   });
 
+  it("parses shorthand 'after 9a'", () => {
+    const tw = parseTimeWindow("Show all routines after 9a");
+    expect(tw).not.toBeNull();
+    expect(tw!.afterMinutes).toBe(9 * 60);
+  });
+
   it("parses 'after 9 am' with space", () => {
     const tw = parseTimeWindow("show routines after 9 am");
     expect(tw).not.toBeNull();
@@ -49,6 +55,12 @@ describe("parseTimeWindow", () => {
 
   it("parses 'before 11am'", () => {
     const tw = parseTimeWindow("show routines before 11am");
+    expect(tw).not.toBeNull();
+    expect(tw!.beforeMinutes).toBe(11 * 60);
+  });
+
+  it("parses shorthand 'before 11a'", () => {
+    const tw = parseTimeWindow("show routines before 11a");
     expect(tw).not.toBeNull();
     expect(tw!.beforeMinutes).toBe(11 * 60);
   });
