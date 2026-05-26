@@ -1,5 +1,9 @@
 import type { ScheduleQueryFilters } from "@/lib/schedule/assistantIntentFilter";
 import { runAssistantPipeline } from "@/lib/schedule/assistantPipeline";
+import {
+  assistantJsonEnvelopeToTransportEvent,
+  assistantResponseTransport,
+} from "@/lib/schedule/assistant/assistantResponseTransport";
 import type { ScheduledRoutine } from "@/lib/schedule/types";
 import { applyScheduleAssistantOps } from "@/lib/schedule/scheduleAssistantOps";
 import type { ScheduleAssistantOp } from "@/lib/schedule/scheduleAssistantOps";
@@ -121,38 +125,56 @@ async function runViaHttp(
   let riskScore: number | undefined;
   let blastRadius: number | undefined;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += dec.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data: ")) continue;
-      try {
-        const evt = JSON.parse(trimmed.slice(6)) as {
-          type: string;
-          reply?: string;
-          operations?: ScheduleAssistantOp[];
-          querySource?: "local" | "ai" | "gate";
-          needsClarification?: boolean;
-          riskScore?: number;
-          blastRadius?: number;
-          error?: string;
-        };
-        if (evt.type === "done") {
-          reply = evt.reply ?? "";
-          operations = evt.operations ?? [];
-          querySource = evt.querySource;
-          needsClarification = evt.needsClarification;
-          riskScore = evt.riskScore;
-          blastRadius = evt.blastRadius;
-        } else if (evt.type === "error") {
-          streamError = evt.error;
+  const applyEvent = (evt: {
+    type?: string;
+    reply?: string;
+    operations?: unknown[];
+    querySource?: "local" | "ai" | "gate";
+    needsClarification?: boolean;
+    riskScore?: number;
+    blastRadius?: number;
+    error?: unknown;
+  }) => {
+    if (evt.type === "done") {
+      reply = evt.reply ?? "";
+      operations = Array.isArray(evt.operations) ? (evt.operations as ScheduleAssistantOp[]) : [];
+      querySource = evt.querySource;
+      needsClarification = evt.needsClarification;
+      riskScore = evt.riskScore;
+      blastRadius = evt.blastRadius;
+    } else if (evt.type === "error") {
+      streamError = typeof evt.error === "string" ? evt.error : "Assistant request failed";
+    }
+  };
+
+  if (assistantResponseTransport(res.headers.get("Content-Type")) === "json") {
+    applyEvent(assistantJsonEnvelopeToTransportEvent((await res.json()) as Record<string, unknown>));
+  } else {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += dec.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data: ")) continue;
+        try {
+          applyEvent(
+            JSON.parse(trimmed.slice(6)) as {
+              type: string;
+              reply?: string;
+              operations?: ScheduleAssistantOp[];
+              querySource?: "local" | "ai" | "gate";
+              needsClarification?: boolean;
+              riskScore?: number;
+              blastRadius?: number;
+              error?: string;
+            }
+          );
+        } catch {
+          /* skip */
         }
-      } catch {
-        /* skip */
       }
     }
   }

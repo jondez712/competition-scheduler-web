@@ -22,3 +22,6 @@
   # OpenAI “tuning” env values often match harmless defaults in code; omit from value scanning.
   # https://ntl.fyi/configure-secrets-scanning
   SECRETS_SCAN_OMIT_KEYS = "OPENAI_SCHEDULE_ASSISTANT_MODEL,OPENAI_SCHEDULE_MODEL,OPENAI_SCHEDULE_TEMPERATURE"
+  # Netlify/HTTP2 has been unreliable for this assistant's SSE route on large schedule prompts.
+  # Keep production assistant responses on normal application/json unless explicitly debugging SSE.
+  SCHEDULE_ASSISTANT_STREAMING_ENABLED = "false"

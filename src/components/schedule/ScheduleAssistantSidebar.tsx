@@ -38,6 +38,7 @@ import {
 } from "@/lib/schedule/assistant/assistantShadowMode";
 import {
   assistantConnectionInterruptedMessage,
+  assistantJsonEnvelopeToTransportEvent,
   assistantResponseTransport,
 } from "@/lib/schedule/assistant/assistantResponseTransport";
 import {
@@ -393,9 +394,20 @@ export function ScheduleAssistantSidebar({
       if (!res.ok || !res.body) {
         const rawRes = res.body ? await res.text().catch(() => "") : "";
         let errMsg = `Request failed (${res.status})`;
+        let errMsgFromAssistant = false;
         try {
-          const parsed = JSON.parse(rawRes) as { error?: string };
-          if (parsed.error) errMsg = parsed.error;
+          const parsed = JSON.parse(rawRes) as {
+            error?: string | { message?: string };
+            messages?: Array<{ role?: string; content?: string }>;
+          };
+          const assistantMessage = parsed.messages?.find(
+            (message) => message.role === "assistant" && message.content
+          )?.content;
+          if (assistantMessage) {
+            errMsg = assistantMessage;
+            errMsgFromAssistant = true;
+          } else if (typeof parsed.error === "string") errMsg = parsed.error;
+          else if (parsed.error?.message) errMsg = parsed.error.message;
         } catch {
           const plain = rawRes.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
           if (plain) errMsg = `Request failed (${res.status}): ${plain}`;
@@ -403,7 +415,10 @@ export function ScheduleAssistantSidebar({
         setLastError(errMsg);
         setMessages((m) => [
           ...m,
-          { role: "assistant", content: assistantFailureBubble(res.status, errMsg) },
+          {
+            role: "assistant",
+            content: errMsgFromAssistant ? errMsg : assistantFailureBubble(res.status, errMsg),
+          },
         ]);
         return;
       }
@@ -479,7 +494,9 @@ export function ScheduleAssistantSidebar({
       };
 
       if (assistantResponseTransport(res.headers.get("Content-Type")) === "json") {
-        const evt = (await res.json()) as AssistantTransportEvent;
+        const evt = assistantJsonEnvelopeToTransportEvent(
+          (await res.json()) as Record<string, unknown>
+        ) as AssistantTransportEvent;
         applyAssistantEvent(evt);
       } else {
         const reader = res.body.getReader();

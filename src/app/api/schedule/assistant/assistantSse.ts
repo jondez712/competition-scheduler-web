@@ -33,6 +33,7 @@ export function assistantRouteSoftTimeoutMs(
   const raw = env?.SCHEDULE_ASSISTANT_ROUTE_SOFT_TIMEOUT_MS;
   const parsed = raw ? Number(raw) : NaN;
   if (Number.isFinite(parsed) && parsed >= 5_000) return parsed;
+  if (boolEnv(env?.NETLIFY)) return 20_000;
   return 50_000;
 }
 
@@ -61,6 +62,7 @@ export function assistantRouteStreamingEnabled(
   const explicit = env?.SCHEDULE_ASSISTANT_STREAMING_ENABLED;
   if (boolEnv(explicit)) return true;
   if (explicitFalseEnv(explicit)) return false;
+  if (boolEnv(env?.NETLIFY) || env?.CONTEXT === "production") return false;
   return true;
 }
 

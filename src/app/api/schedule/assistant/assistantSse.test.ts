@@ -39,13 +39,14 @@ describe("assistant SSE helpers", () => {
   it("uses production-safe default heartbeat and soft timeout intervals", () => {
     expect(assistantRouteHeartbeatMs({})).toBe(5_000);
     expect(assistantRouteSoftTimeoutMs({})).toBe(50_000);
+    expect(assistantRouteSoftTimeoutMs({ NETLIFY: "true" })).toBe(20_000);
     expect(assistantRouteHeartbeatMs({ SCHEDULE_ASSISTANT_ROUTE_HEARTBEAT_MS: "7000" })).toBe(7_000);
     expect(assistantRouteSoftTimeoutMs({ SCHEDULE_ASSISTANT_ROUTE_SOFT_TIMEOUT_MS: "45000" })).toBe(45_000);
   });
 
-  it("keeps streaming on by default and allows explicit JSON fallback", () => {
-    expect(assistantRouteStreamingEnabled({ NETLIFY: "true" })).toBe(true);
-    expect(assistantRouteStreamingEnabled({ CONTEXT: "production" })).toBe(true);
+  it("uses JSON on Netlify/production by default and allows explicit streaming", () => {
+    expect(assistantRouteStreamingEnabled({ NETLIFY: "true" })).toBe(false);
+    expect(assistantRouteStreamingEnabled({ CONTEXT: "production" })).toBe(false);
     expect(
       assistantRouteStreamingEnabled({
         NETLIFY: "true",

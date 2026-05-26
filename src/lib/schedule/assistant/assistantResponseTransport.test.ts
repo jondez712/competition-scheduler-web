@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assistantConnectionInterruptedMessage,
+  assistantJsonEnvelopeToTransportEvent,
   assistantResponseTransport,
 } from "@/lib/schedule/assistant/assistantResponseTransport";
 
@@ -22,5 +23,33 @@ describe("assistant response transport", () => {
     expect(assistantConnectionInterruptedMessage(undefined)).toBe(
       "The assistant connection was interrupted. Please try again."
     );
+  });
+
+  it("normalizes production JSON envelopes into completed assistant events", () => {
+    expect(
+      assistantJsonEnvelopeToTransportEvent({
+        ok: true,
+        messages: [{ role: "assistant", content: "Done." }],
+        assistantOperations: [{ op: "swap_by_entry_id" }],
+      })
+    ).toMatchObject({
+      type: "done",
+      reply: "Done.",
+      operations: [{ op: "swap_by_entry_id" }],
+    });
+  });
+
+  it("normalizes error JSON envelopes into clean assistant messages", () => {
+    expect(
+      assistantJsonEnvelopeToTransportEvent({
+        ok: false,
+        messages: [{ role: "assistant", content: "Try narrowing the request." }],
+        error: { code: "ASSISTANT_REQUEST_FAILED", message: "sanitized" },
+      })
+    ).toMatchObject({
+      type: "done",
+      reply: "Try narrowing the request.",
+      operations: [],
+    });
   });
 });
